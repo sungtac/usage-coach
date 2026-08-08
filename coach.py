@@ -327,7 +327,12 @@ def fetch_live_all(provider):
     out = subprocess.run(cmd, capture_output=True, text=True,
                          timeout=120, start_new_session=True, stdin=subprocess.DEVNULL)
     if out.returncode != 0:
-        raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
+        error = (out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1]
+        try:
+            usage = fetch_live(provider)
+        except RuntimeError:
+            raise RuntimeError(error)
+        return [usage]
     usages = [e.get("usage") or {} for e in json.loads(out.stdout)]
     if provider == "antigravity":
         usages = [antigravity_gemini_only(u) for u in usages]

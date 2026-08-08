@@ -28,7 +28,6 @@ import coach as coachmod   # 판정 정책 재사용(classify 등) — 정본은
 COACH = Path(__file__).with_name("coach.py")
 CONFIG_PATH = os.path.expanduser("~/.config/usage-coach/discord.json")
 STATE_PATH = os.path.expanduser("~/.config/usage-coach/discord-state.json")
-SESSIONS_DIR = os.path.expanduser("~/.config/usage-coach/sessions")
 USERNAME = "dashboard"
 FLAG_COMPONENTS_V2 = 32768   # 1 << 15
 
@@ -115,210 +114,6 @@ def _primary_window(windows):
         if key in windows:
             return key
     return next(iter(windows), None)
-
-
-# ---------------------------------------------------------------- 디스코드 브리지 세션
-
-# 디스코드에 붙어 있는 봇들 — 봇마다 한 행(폴더 경로 [봇/모델] ctx%)으로 표시.
-# 브리지 봇은 config "bridges", 클로드 봇은 "claude_bots"로 교체 가능.
-DEFAULT_BRIDGES = [
-    {"name": "Codex", "kind": "codex", "dir": "~/ai-folder/dev/codex-discord/data",
-     "env": "~/ai-folder/dev/codex-discord/.env"},
-    {"name": "Gemini", "kind": "agy", "dir": "~/ai-folder/dev/codex-discord/data-gemini",
-     "env": "~/ai-folder/dev/codex-discord/.env.gemini"},
-]
-CLAUDE_BOTS_DEFAULT = [
-    {"name": "Claude", "kind": "claude", "cwd": "~/ai-folder/dev/discord-multiagent"},  # 오케 봇
-    {"name": "Claude", "kind": "claude", "cwd": "~/VSCodeWorkspace/discord"},           # 수다 클로드 봇
-]
-CODEX_SESSIONS_ROOT = os.path.expanduser("~/.codex/sessions")
-CODEX_BASELINE = 12000   # codex TUI가 컨텍스트 % 계산에서 제외하는 기본 오버헤드 토큰
-FOLDER_BOTS_PATH = os.path.expanduser("~/.config/folder-bot/bots.json")
-
-
-def _folder_bots():
-    """folder-bot 플러그인의 봇 정본(bots.json). 미설치·파손이면 빈 dict."""
-    try:
-        with open(FOLDER_BOTS_PATH) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
-
-
-def _pid_alive(path):
-    try:
-        pid = int(open(path).read().strip())
-        os.kill(pid, 0)
-        return True
-    except (OSError, ValueError):
-        return False
-
-
-def _codex_latest(workdir):
-    """workdir에서 가장 최근 활동한 codex 세션(TUI 포함) -> (used%, ts, model).
-
-    exec/TUI 어느 쪽이든 rollout의 session_meta cwd로 판별한다. used%는 codex TUI와
-    같은 식(baseline 오버헤드 제외): (total - 12000) / (window - 12000)."""
-    files = glob.glob(os.path.join(CODEX_SESSIONS_ROOT, "*", "*", "*", "*.jsonl"))
-    files.sort(key=os.path.getmtime, reverse=True)
-    for path in files[:400]:
-        try:
-            with open(path, "rb") as f:
-                head = f.readline().decode("utf-8", "replace")
-        except OSError:
-            continue
-        if f'"cwd":"{workdir}"' not in head:
-            continue
-        mtime = os.path.getmtime(path)
-        try:
-            with open(path, "rb") as f:
-                f.seek(max(0, os.path.getsize(path) - 131072))
-                tail = f.read().decode("utf-8", "replace")
-        except OSError:
-            return None, mtime, None
-        models = re.findall(r'"model":"([^"]+)"', tail)
-        model = models[-1] if models else None
-        if model is None:
-            # model 키는 초기 턴(session_meta·turn_context)에 몰려 있어 큰 rollout에서는
-            # tail 창 밖으로 밀려난다 (collab 실측: 361KB 파일, 키는 100~146KB 지점) —
-            # tail에 없으면 전체를 한 번 읽어 찾는다 (5분 주기 1회라 비용 무시 가능).
-            try:
-                with open(path, "rb") as f:
-                    whole = f.read().decode("utf-8", "replace")
-                models = re.findall(r'"model":"([^"]+)"', whole)
-                model = models[-1] if models else None
-            except OSError:
-                pass
-        for line in reversed(tail.splitlines()):
-            if '"token_count"' not in line:
-                continue
-            try:
-                info = json.loads(line[line.index("{"):])["payload"]["info"]
-                total = info["last_token_usage"]["total_tokens"]
-                window = info["model_context_window"]
-                used = max(0.0, total - CODEX_BASELINE) / (window - CODEX_BASELINE) * 100
-                return used, mtime, model
-            except (ValueError, KeyError, TypeError, ZeroDivisionError):
-                continue
-        return None, mtime, model
-    return None, None, None
-
-
-def _env_var(path, name):
-    try:
-        for line in open(os.path.expanduser(path)):
-            if line.startswith(name + "="):
-                return line.split("=", 1)[1].strip()
-    except (OSError, TypeError):
-        pass
-    return None
-
-
-def _fmt_age(ts):
-    if not ts:
-        return None
-    sec = max(0, time.time() - ts)
-    if sec < 60:
-        return "방금"
-    if sec < 3600:
-        return f"{int(sec // 60)}분 전"
-    if sec < 86400:
-        return f"{int(sec // 3600)}시간 전"
-    return f"{int(sec // 86400)}일 전"
-
-
-def _shorten_home(path):
-    return (path or "").replace(os.path.expanduser("~"), "~")
-
-
-def collect_bots(config):
-    """디스코드 봇별 한 행: 작업 폴더 + ctx%(+ 마지막 활동). statusline 형식과 동일 축."""
-    rows = []
-    # 브리지 봇(codex/gemini) — 폴더 = CODEX_WORKDIR, ctx·모델 = 최근 활동 세션 rollout
-    for b in config.get("bridges", DEFAULT_BRIDGES):
-        d = os.path.expanduser(b["dir"])
-        workdir_abs = _env_var(b.get("env"), "CODEX_WORKDIR") or ""
-        alive = _pid_alive(os.path.join(d, "daemon.pid"))
-        used, ts, model = (None, None, None)
-        if b["kind"] == "codex" and workdir_abs:
-            used, ts, model = _codex_latest(workdir_abs)
-        rows.append({"label": _shorten_home(workdir_abs) or "?",
-                     "tag": model or b["name"], "kind": b["kind"],
-                     "used": used, "ts": ts,
-                     "note": None if alive else "브리지 꺼짐"})
-    # 클로드 봇(오케 등) — statusline 스냅샷에서 해당 폴더의 최신 세션을 찾는다
-    snaps = load_sessions()
-    for cb in config.get("claude_bots", CLAUDE_BOTS_DEFAULT):
-        cwd = _shorten_home(os.path.expanduser(cb["cwd"]))
-        # project_dir(세션을 띄운 폴더) 우선 — 봇이 tasks/ 하위로 cd 해도 행이 끊기지 않는다.
-        # project_dir이 없는 옛 스냅샷은 cwd로 폴백.
-        best = max((s for s in snaps if (s.get("project_dir") or s.get("cwd")) == cwd),
-                   key=lambda s: s.get("ts") or 0, default=None)
-        rows.append({"label": cwd,
-                     "tag": (best or {}).get("model") or cb.get("name", "Claude"),
-                     "kind": "claude",
-                     "used": (best or {}).get("used"),
-                     "ts": (best or {}).get("ts"), "note": None})
-    # folder-bot 자동 발견 — ~/.config/folder-bot/bots.json에 등록된 폴더 봇은
-    # 이 config를 손대지 않아도 자동으로 행이 생긴다 (folder-bot 플러그인이 정본).
-    seen = {r["label"] for r in rows}
-    for name, fb in _folder_bots().items():
-        folder = _shorten_home(os.path.expanduser(fb.get("folder", "")))
-        if not folder or folder in seen:
-            continue
-        engine = fb.get("engine", "claude")
-        if engine == "claude":
-            best = max((s for s in snaps if (s.get("project_dir") or s.get("cwd")) == folder),
-                       key=lambda s: s.get("ts") or 0, default=None)
-            rows.append({"label": folder,
-                         "tag": (best or {}).get("model") or "Claude",
-                         "kind": "claude",
-                         "used": (best or {}).get("used"),
-                         "ts": (best or {}).get("ts"), "note": None})
-        elif engine == "codex":
-            bridge = os.path.expanduser(fb.get("bridge_dir", "~/codex-discord"))
-            alive = _pid_alive(os.path.join(bridge, f"data-{name}", "daemon.pid"))
-            used, ts, model = _codex_latest(os.path.expanduser(fb["folder"]))
-            rows.append({"label": folder, "tag": model or "Codex", "kind": "codex",
-                         "used": used, "ts": ts,
-                         "note": None if alive else "브리지 꺼짐"})
-    return rows
-
-
-# ---------------------------------------------------------------- 세션 스냅샷 (statusline이 기록)
-
-def load_sessions():
-    """statusline-command.sh가 남긴 로컬 Claude Code 세션 스냅샷 목록(48시간 지난 파일 청소).
-    표시 여부 판단은 호출부(collect_bots — 봇 폴더와 매칭되는 것만)."""
-    sessions, now = [], time.time()
-    try:
-        names = os.listdir(SESSIONS_DIR)
-    except OSError:
-        return []
-    for name in names:
-        path = os.path.join(SESSIONS_DIR, name)
-        try:
-            if now - os.path.getmtime(path) > 172800:
-                os.remove(path)
-                continue
-            with open(path, encoding="utf-8") as f:
-                s = json.load(f)
-            home = os.path.expanduser("~")
-            s["cwd"] = (s.get("cwd") or "").replace(home, "~")
-            if s.get("project_dir"):
-                s["project_dir"] = s["project_dir"].replace(home, "~")
-            sessions.append(s)
-        except (OSError, json.JSONDecodeError):
-            continue
-    return sessions
-
-
-def _ctx_emoji(used):
-    if used >= 80:
-        return "🔴"
-    if used >= 40:      # 사용자 마감 습관 기준 — 40%부터 주의
-        return "🟡"
-    return "🟢"
 
 
 # ---------------------------------------------------------------- Components V2 조립
@@ -409,33 +204,9 @@ def _provider_container(key, p):
             "components": children}
 
 
-def _bots_container(bots):
-    rows = []
-    heads = [f"{s.get('label') or '?'}  [{s.get('tag') or '?'}]" for s in bots]
-    width = max((len(h) for h in heads), default=1)
-    for s, head in zip(bots, heads):
-        used = s.get("used")
-        emoji = "⚪" if (s.get("note") or used is None) else _ctx_emoji(used)
-        ctx = f"{round(used)}%" if used is not None else "—"
-        line = f"{emoji} `{head.ljust(width)}  {_bar(used)}` **{ctx}**"
-        extra = s.get("note") or _fmt_age(s.get("ts"))
-        if extra:
-            line += f" · {extra}"
-        rows.append(line)
-    # accent = 가장 빡빡한 세션의 ctx 색 (ctx 미상뿐이면 회색)
-    worst = max((s["used"] for s in bots if s.get("used") is not None), default=None)
-    color = ("#565B66" if worst is None else
-             "#F04747" if worst >= 80 else "#FAA61A" if worst >= 40 else "#43B581")
-    return {"type": 17, "accent_color": _accent(color), "components": [
-        {"type": 10, "content": "### 봇 세션"},
-        {"type": 10, "content": "\n".join(rows)}]}
-
-
-def build_components(payload, bots):
+def build_components(payload):
     provs = payload.get("providers", {})
     comps = [_provider_container(key, provs[key]) for key in provider_order(provs)]
-    if bots:
-        comps.append(_bots_container(bots))
     comps.append({"type": 10, "content": f"-# 갱신 <t:{int(time.time())}:R>"})
     return comps
 
@@ -569,7 +340,7 @@ def main():
     if multi_provs:
         merge_all_accounts(payload, multi_provs, config)
 
-    components = build_components(payload, collect_bots(config))
+    components = build_components(payload)
 
     if args.out:
         Path(args.out).write_text(json.dumps(components, ensure_ascii=False, indent=1),
