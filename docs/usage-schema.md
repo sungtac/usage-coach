@@ -4,11 +4,12 @@
 
 ## 조회 명령 (provider별 별도 — `--provider all`은 hang)
 ```bash
-codexbar usage --provider claude  --format json --pretty
+codexbar usage --provider claude  --source oauth --format json --pretty
 codexbar usage --provider codex --source cli --format json --pretty   # codex는 반드시 --source cli 별도
 codexbar usage --provider gemini --source api --format json --pretty
 ```
 - ⚠️ `codexbar --provider all` = **hang 확인됨**(중단 필요). provider별로 따로 받아 합칠 것.
+- Claude는 기본 `web` 소스가 이전 계정의 Keychain 캐시를 반환할 수 있으므로 `--source oauth`를 사용한다. 사용량 코치도 이 소스를 고정한다.
 - ⚠️ codex는 `--source cli` 명시(별도 조회). 그래야 RPC→PTY로 정확. (다른 세션 codex 작업서도 동일 권고.)
 
 ## 공통 스키마 (provider당 배열 1원소)

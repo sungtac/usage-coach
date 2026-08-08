@@ -34,9 +34,20 @@ WEEKLY_MINUTES = 10080   # 7일 윈도우. 가드는 이 윈도우만 본다(5h�
 
 # 라이브 조회 명령 (provider별 별도 — `--provider all`은 hang)
 LIVE_CMDS = {
-    "claude": ["codexbar", "usage", "--provider", "claude", "--format", "json"],
+    # Claude의 CodexBar 기본(web) 소스는 이전 계정의 Keychain 웹 캐시를
+    # 계속 반환할 수 있다. 현재 Claude CLI/OAuth 로그인과 같은 계정을
+    # 조회하도록 oauth를 명시한다. (2026-07-31: 6200 캐시 vs 3613 로그인 불일치)
+    "claude": ["codexbar", "usage", "--provider", "claude", "--source", "oauth", "--format", "json"],
     "codex":  ["codexbar", "usage", "--provider", "codex", "--source", "cli", "--format", "json"],
     "antigravity": ["codexbar", "usage", "--provider", "antigravity", "--format", "json"],
+}
+# OAuth는 현재 계정에 가장 정확하지만 macOS Keychain이 잠긴 순간
+# codexbar가 -25308로 실패할 수 있다. CLI도 현재 Claude CLI 로그인에
+# 연결되므로, stale web 캐시 대신 CLI를 제한적 대체 경로로 사용한다.
+LIVE_FALLBACK_CMDS = {
+    "claude": [["codexbar", "usage", "--provider", "claude", "--source", "cli", "--format", "json"]],
+    "codex": [],
+    "antigravity": [],
 }
 
 # --account PROVIDER:LABEL 오버라이드 → codexbar --account 패스스루 (main에서 채움)
@@ -290,16 +301,24 @@ def fetch_live(provider):
     못하게 별도 세션으로 실행 → Ctrl-C(SIGINT)가 codexbar에 먹히지 않고 watch가 정상 종료.
     stdin=DEVNULL: codexbar가 우리 입력을 읽지 않도록.
     """
-    cmd = list(LIVE_CMDS[provider])
-    if provider in ACCOUNT_OVERRIDES:
-        cmd += ["--account", ACCOUNT_OVERRIDES[provider]]
-    out = subprocess.run(cmd, capture_output=True, text=True,
-                         timeout=40, start_new_session=True, stdin=subprocess.DEVNULL)
-    if out.returncode != 0:
-        raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
-    data = json.loads(out.stdout)
-    usage = data[0]["usage"]
-    return antigravity_gemini_only(usage) if provider == "antigravity" else usage
+    commands = [LIVE_CMDS[provider], *LIVE_FALLBACK_CMDS.get(provider, [])]
+    errors = []
+    for command in commands:
+        cmd = list(command)
+        if provider in ACCOUNT_OVERRIDES:
+            cmd += ["--account", ACCOUNT_OVERRIDES[provider]]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=40, start_new_session=True,
+                                 stdin=subprocess.DEVNULL)
+            if out.returncode != 0:
+                raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
+            data = json.loads(out.stdout)
+            usage = data[0]["usage"]
+            return antigravity_gemini_only(usage) if provider == "antigravity" else usage
+        except (OSError, ValueError, KeyError, IndexError, RuntimeError) as exc:
+            errors.append(str(exc))
+    raise RuntimeError("; ".join(errors) if errors else "조회 실패")
 
 
 def fetch_live_all(provider):
@@ -407,8 +426,7 @@ def to_payload(results):
             "level": _LEVEL.get(r["emoji"]),     # 코칭 불가 시 null
             "action": r["action"],               # 권장 작업 크기 (전문)
             "reason": r["detail"],               # 이유·타이밍 (전문, 그대로)
-            "windows": {_WKEY.get(n, n): {"left_pct": p,
-                                          "reset_min": None if m is None else round(m)}
+            "windows": {_WKEY.get(n, n): {"left_pct": p, "reset_min": None if m is None else round(m)}
                         for n, p, m in r["windows"]},
         }
     return {"ts": now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"), "providers": provs}
@@ -489,14 +507,14 @@ def load_guard_config(path=GUARD_CONFIG_PATH):
     """guard.json -> {provider: {m, floor, pace}}. 파일/키 누락은 GUARD_DEFAULT로 보완.
 
     훅은 임의 cwd에서 돌아 상대경로가 안 통하므로 고정 절대경로에서 읽는다.
-    파싱 실패·파일 없음도 조용히 기본값 — 설정 오류로 작업을 죽이지 않는다(fail-open).
+    파싱 실패·파일 없음은 안전한 기본값으로 대체한다. 가드 판정 자체를 끄지 않는다.
     """
     try:
         with open(path) as f:
             raw = json.load(f)
     except Exception:
         raw = {}
-    if not isinstance(raw, dict):    # [] 등 dict 아닌 JSON → 기본값(fail-open)
+    if not isinstance(raw, dict):    # [] 등 dict 아닌 JSON → 안전한 기본값
         raw = {}
 
     def _num(entry, key):
@@ -526,21 +544,24 @@ def guard_check(sources, cfg):
     정지 조건(provider별, 하나라도 걸리면 정지):
       left < timeLeft − m   (pace: 너무 빨리 태움 — pace:false면 건너뜀)
       OR left < floor       (absolute: 바닥 임박)
-    fail-open: 조회 실패 / 7일 windowMinutes 없음 → 그 provider는 정지에 기여 안 함.
+    guard가 켜진 상태에서는 조회 실패 / 7일 windowMinutes 없음도 안전상 정지 사유다.
     """
     triggers = []
+    unavailable = []
     for label, kind, arg in sources:
         try:
             usage = load_usage(kind, arg)
             w = pick(usage, WEEKLY_MINUTES)     # 7일만 — 5h는 보지 않음
-        except Exception:
-            continue                            # 조회 실패 → fail-open
+        except Exception as exc:
+            unavailable.append(f"{label}: 사용량 조회 실패({type(exc).__name__})")
+            continue
         if not w:
-            continue                            # 7일 윈도우 없음/무효 → fail-open
+            unavailable.append(f"{label}: 유효한 7일 사용량 window 없음")
+            continue
         c = cfg.get(label, GUARD_DEFAULT)
         m, floor, pace = c["m"], c["floor"], c.get("pace", True)
         # 7일 윈도우 리셋은 최대 7일 후 → timeLeft ≤ 1.0. 손상된 먼 미래 resetsAt가
-        # 폭주시켜 엉뚱하게 정지시키지 않도록 클램프(fail-open 철학).
+        # 리셋 시각 오염으로 엉뚱하게 정지시키지 않도록 시간값만 클램프한다.
         left, time_left, mins = w["left"], min(1.0, w["timeLeft"]), w["mins"]
         # pace:false = "남은 쿼터 소진" — 페이스 조건을 건너뛰고 floor만 본다.
         if pace and left < time_left - m:
@@ -549,6 +570,8 @@ def guard_check(sources, cfg):
         elif left < floor:
             triggers.append(f"{label} 주간 한도 바닥 임박 — 남은 {left*100:.0f}% "
                             f"< 하한 {floor*100:.0f}%")
+    if unavailable:
+        return "요금가드 판정 불가 — " + " · ".join(unavailable) + " → 작업을 멈추고 coach/codexbar 상태를 확인하세요."
     if not triggers:
         return None
     return "요금가드: " + " · ".join(triggers) + " → 작업을 멈추고 확인하세요."
@@ -576,7 +599,7 @@ def guard_enabled():
 def set_guard(on):
     """런타임 스위치 토글. on→플래그 파일 생성(부모 mkdir 포함) / off→삭제.
 
-    설정 디렉토리 권한 오류 등으로 작업을 죽이지 않도록 fail-open(조용히 무시).
+    설정 디렉토리 권한 오류는 guard를 켰다고 착각하지 않도록 호출자에게 전달한다.
     """
     try:
         if on:
@@ -587,8 +610,8 @@ def set_guard(on):
                 os.remove(GUARD_ENABLED_PATH)
             except FileNotFoundError:
                 pass                                # 이미 off
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(f"요금가드 스위치를 변경하지 못했습니다: {type(exc).__name__}") from exc
 
 
 def run_guard_cmd(action, sources):
@@ -597,10 +620,18 @@ def run_guard_cmd(action, sources):
     on/off는 플래그 파일을 토글하고, status는 현재 상태 + 지금 사용량으로 판정 미리보기.
     """
     if action == "on":
-        set_guard(True)
+        try:
+            set_guard(True)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1)
         print("요금가드: on (플래그 생성)")
     elif action == "off":
-        set_guard(False)
+        try:
+            set_guard(False)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1)
         print("요금가드: off (플래그 삭제)")
     else:   # status (기본)
         state = "on" if guard_enabled() else "off"
@@ -609,7 +640,7 @@ def run_guard_cmd(action, sources):
         try:
             reason = guard_check(sources, load_guard_config())
         except Exception:
-            reason = None                           # 조회 오류 → 미리보기 생략(fail-open)
+            reason = None                           # 조회 오류 → status 미리보기만 생략
         if reason:
             print(f"  지금이면 정지: {reason}")
         else:
@@ -638,7 +669,7 @@ def run_guard_check(sources):
     """`coach --guard-check` — Codex 워처용 provider-중립 모드. -> exit code(int).
 
     루프 게이트 없음 + guard-enabled 게이트는 적용(off면 통과).
-    출력 계약: 통과/판정불가 → exit 0 + 무출력 / 정지 → exit≠0(10) + 사유 1줄 stdout.
+    출력 계약: 통과 → exit 0 + 무출력 / 정지·판정불가 → exit≠0(10) + 사유 1줄 stdout.
     """
     if not guard_enabled():
         return 0                                    # 스위치 off → 통과(무출력)

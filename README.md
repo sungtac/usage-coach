@@ -49,6 +49,14 @@ coach --json                             # 머신 출력(JSON 1줄) — 에이�
 
 codexbar 제약: `--provider all`은 hang하므로 provider별로 따로 조회한다(coach가 자동 처리). codex는 `--source cli`.
 
+## 테스트
+
+각 테스트 파일은 현재 작업 디렉터리와 무관하게 직접 실행할 수 있다.
+
+```bash
+for test_file in tests/test_*.py; do python3 "$test_file" || exit 1; done
+```
+
 ## 요금 가드 (에이전트 루프)
 
 긴 자율 루프가 사용량을 보고 **위험하면 스스로 멈추게** 한다.
@@ -57,7 +65,7 @@ codexbar 제약: `--provider all`은 hang하므로 provider별로 따로 조회�
 - `coach --guard-check` — provider 중립 체크. 정지 시 exit≠0 + 사유, 통과 시 exit 0.
 - `coach guard on|off|status` — 런타임 스위치.
 
-판정 = 하이브리드 OR: `left < timeLeft − m`(페이스) **또는** `left < floor`(절대). 데이터 오류 시 fail-open(통과). 설정 = `~/.config/usage-coach/guard.json` (provider별 `m`/`floor`, 기본 0.10/0.10).
+판정 = 하이브리드 OR: `left < timeLeft − m`(페이스) **또는** `left < floor`(절대). guard가 켜진 상태에서 coach/codexbar 조회 오류나 유효한 7일 window 부재는 fail-closed 정지 사유다. 설정 = `~/.config/usage-coach/guard.json` (provider별 `m`/`floor`, 기본 0.10/0.10).
 
 ## 디스코드 대시보드 (`discord_dash.py`)
 
