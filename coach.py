@@ -6,6 +6,7 @@
 """
 import argparse
 import datetime as dt
+import fcntl
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import termios
+import time
 import tty
 import unicodedata
 
@@ -32,10 +34,20 @@ GUARD_DEFAULT = {"m": 0.10, "floor": 0.10, "pace": True}   # provider별 기본:
 GUARD_TARGETS = ["claude", "codex", "antigravity"]   # 가드 대상(gemini == antigravity)
 WEEKLY_MINUTES = 10080   # 7일 윈도우. 가드는 이 윈도우만 본다(5h는 무시).
 
+# codexbar 프로세스 간 상호배제용 lock 파일 — 여러 coach.py 프로세스(세션별
+# statusline, 대시보드 등)가 동시에 codexbar를 부르면 codexbar 자체가 잠금·행이
+# 걸린다(실측: claude 단독 조회도 이 경합 중엔 실패). _run_codexbar가 사용.
+CODEXBAR_LOCK_PATH = os.path.expanduser("~/.config/usage-coach/codexbar.lock")
+
 # 라이브 조회 명령 (provider별 별도 — `--provider all`은 hang)
+# codex는 --source auto(oauth 우선, 필요시 web/cli로 폴백). 예전엔 --source cli로
+# 고정했었는데, cli는 codex의 app-server RPC(account/rateLimits/read)를 거쳐서
+# app-server가 상시 데몬이 아닌 ephemeral 모드인 환경(WSL2 등)에서는 거의 항상
+# 타임아웃난다(실측 5/5 실패). auto가 쓰는 oauth 경로는 데몬 없이 바로 응답한다
+# (실측 3/3 성공) — 계정별 5h(primary) 윈도우가 없을 수 있는 게 유일한 트레이드오프.
 LIVE_CMDS = {
     "claude": ["codexbar", "usage", "--provider", "claude", "--format", "json"],
-    "codex":  ["codexbar", "usage", "--provider", "codex", "--source", "cli", "--format", "json"],
+    "codex":  ["codexbar", "usage", "--provider", "codex", "--source", "auto", "--format", "json"],
     "antigravity": ["codexbar", "usage", "--provider", "antigravity", "--format", "json"],
 }
 
@@ -283,33 +295,77 @@ def antigravity_gemini_only(usage):
     return u
 
 
-def fetch_live(provider):
-    """codexbar 라이브 조회 -> usage dict. 실패 시 예외.
+def _codexbar_lock(timeout=60):
+    """codexbar 프로세스 간 상호배제. timeout초 안에 못 잡으면 fail-open으로
+    잠금 없이 진행(오늘까지의 동작과 동일 — 상황을 악화시키지 않는다)."""
+    os.makedirs(os.path.dirname(CODEXBAR_LOCK_PATH), exist_ok=True)
+    fd = open(CODEXBAR_LOCK_PATH, "w")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+    return fd
+
+
+def _run_codexbar(cmd, timeout):
+    """codexbar 서브프로세스 1회 실행 -> stdout 파싱된 JSON. 실패 시 RuntimeError.
 
     start_new_session=True: codexbar가 우리 제어터미널/포그라운드 그룹을 가로채지
     못하게 별도 세션으로 실행 → Ctrl-C(SIGINT)가 codexbar에 먹히지 않고 watch가 정상 종료.
     stdin=DEVNULL: codexbar가 우리 입력을 읽지 않도록.
+    _codexbar_lock으로 다른 coach.py 프로세스와 직렬화(codexbar 동시실행 제약, 위 참조).
     """
+    lock_fd = _codexbar_lock()
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=timeout, start_new_session=True, stdin=subprocess.DEVNULL)
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            lock_fd.close()
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
+    return json.loads(out.stdout)
+
+
+def _run_codexbar_retry(cmd, timeout):
+    """_run_codexbar 1회 재시도. codex/antigravity의 codexbar RPC·세션락 조회가
+    다른 codexbar 프로세스와 동시에 돌 때 일시적으로 실패하는 경우가 있어(관측:
+    단독 실행에도 약 30~40% 확률로 발생) 1회 재시도로 흡수한다.
+    subprocess.TimeoutExpired(lock 대기 중 다른 프로세스 점유로 지연돼 실제
+    실행 몫이 짧아진 경우 등)도 같은 계열 일시 실패라 재시도 대상에 포함한다."""
+    try:
+        return _run_codexbar(cmd, timeout)
+    except (RuntimeError, subprocess.TimeoutExpired):
+        time.sleep(1.5)
+        return _run_codexbar(cmd, timeout)
+
+
+def fetch_live(provider):
+    """codexbar 라이브 조회 -> usage dict. 실패 시 예외(1회 재시도 후).
+
+    timeout=60: 락으로 직렬화된 뒤에도 codexbar 단독 실행 자체가 실측 ~19초
+    걸린다(claude). 40초는 여유가 얕아 부하 시 넘기기 쉬웠다(실측 4-way 동시
+    실행에서 1/4 타임아웃) — 60초로 여유를 넉넉히 둔다."""
     cmd = list(LIVE_CMDS[provider])
     if provider in ACCOUNT_OVERRIDES:
         cmd += ["--account", ACCOUNT_OVERRIDES[provider]]
-    out = subprocess.run(cmd, capture_output=True, text=True,
-                         timeout=40, start_new_session=True, stdin=subprocess.DEVNULL)
-    if out.returncode != 0:
-        raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
-    data = json.loads(out.stdout)
+    data = _run_codexbar_retry(cmd, timeout=60)
     usage = data[0]["usage"]
     return antigravity_gemini_only(usage) if provider == "antigravity" else usage
 
 
 def fetch_live_all(provider):
-    """codexbar --all-accounts -> 등록된 전 계정의 usage dict 리스트."""
+    """codexbar --all-accounts -> 등록된 전 계정의 usage dict 리스트. 실패 시 1회 재시도."""
     cmd = list(LIVE_CMDS[provider]) + ["--all-accounts"]
-    out = subprocess.run(cmd, capture_output=True, text=True,
-                         timeout=120, start_new_session=True, stdin=subprocess.DEVNULL)
-    if out.returncode != 0:
-        raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
-    usages = [e.get("usage") or {} for e in json.loads(out.stdout)]
+    data = _run_codexbar_retry(cmd, timeout=120)
+    usages = [e.get("usage") or {} for e in data]
     if provider == "antigravity":
         usages = [antigravity_gemini_only(u) for u in usages]
     return usages
@@ -352,7 +408,8 @@ def render(results):
     for r in results:
         name = r["label"].title()
         if not r["ok"]:
-            blocks.append([f" ⚠️  {name}  {r['msg']}"])
+            icon = "⚪" if r.get("configured") is False else "⚠️"
+            blocks.append([f" {icon}  {name}  {r['msg']}"])
             continue
         code = PROV_COLOR.get(r["label"], "37")
         meta = "  ·  ".join(x for x in (r.get("email"), r.get("plan")) if x)
@@ -398,7 +455,10 @@ def to_payload(results):
     provs = {}
     for r in results:
         if not r["ok"]:
-            provs[r["label"]] = {"ok": False, "error": r["msg"]}
+            entry = {"ok": False, "error": r["msg"]}
+            if r.get("configured") is False:
+                entry["configured"] = False   # 재시도로 안 풀리는 영구 미설정(에이전트 루프 알람 구분용)
+            provs[r["label"]] = entry
             continue
         provs[r["label"]] = {
             "ok": True,
@@ -472,6 +532,12 @@ def gather_one(source):
     except subprocess.TimeoutExpired:
         return {"label": label, "ok": False, "msg": "조회 시간초과(hang?) — 건너뜀"}
     except Exception as e:
+        msg = str(e)
+        if "No token accounts configured" in msg:
+            # 계정 미등록 — 재시도·락으로 못 고치는 영구 상태(예: 이 호스트에 앱 자체가
+            # 없음). 일시적 조회 실패(⚠️)와 같이 취급하면 대시보드가 매번 "장애"처럼
+            # 알람을 내서 실제 장애 신호를 묻히게 한다 — ⚪(미설정)로 구분한다.
+            return {"label": label, "ok": False, "configured": False, "msg": "미설정(계정 미등록)"}
         return {"label": label, "ok": False, "msg": f"조회 실패: {e}"}
 
 
