@@ -295,12 +295,11 @@ def antigravity_gemini_only(usage):
     return u
 
 
-def _codexbar_lock(timeout=60):
-    """codexbar 프로세스 간 상호배제. timeout초 안에 못 잡으면 fail-open으로
-    잠금 없이 진행(오늘까지의 동작과 동일 — 상황을 악화시키지 않는다)."""
+def _codexbar_lock(deadline):
+    """codexbar 프로세스 간 상호배제. deadline(time.monotonic() 기준)까지 못 잡으면
+    fail-open으로 잠금 없이 진행(오늘까지의 동작과 동일 — 상황을 악화시키지 않는다)."""
     os.makedirs(os.path.dirname(CODEXBAR_LOCK_PATH), exist_ok=True)
     fd = open(CODEXBAR_LOCK_PATH, "w")
-    deadline = time.monotonic() + timeout
     while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -312,25 +311,31 @@ def _codexbar_lock(timeout=60):
     return fd
 
 
-def _run_codexbar(cmd, timeout):
+def _run_codexbar(cmd, deadline):
     """codexbar 서브프로세스 1회 실행 -> stdout 파싱된 JSON. 실패 시 RuntimeError.
 
+    deadline(time.monotonic() 기준)은 락 대기 + 실행이 공유하는 예산이다 — 둘을
+    각자 새로 재면(예전 방식) 락 경합이 심할수록 실행 몫도 그대로 남아 재시도까지
+    겹쳐 최악의 경우 수 분까지 불어났다(코드리뷰 지적). 공유 deadline으로 락 대기가
+    길었으면 실행 몫이 줄어들고, fail-open으로 락 없이 진행하는 경우에도 남은
+    시간이 짧아 무잠금 실행 자체가 오래 못 간다.
     start_new_session=True: codexbar가 우리 제어터미널/포그라운드 그룹을 가로채지
     못하게 별도 세션으로 실행 → Ctrl-C(SIGINT)가 codexbar에 먹히지 않고 watch가 정상 종료.
     stdin=DEVNULL: codexbar가 우리 입력을 읽지 않도록.
-    _codexbar_lock으로 다른 coach.py 프로세스와 직렬화(codexbar 동시실행 제약, 위 참조).
     """
-    lock_fd = _codexbar_lock()
+    lock_fd = _codexbar_lock(deadline)
     try:
+        remaining = max(1, deadline - time.monotonic())
         out = subprocess.run(cmd, capture_output=True, text=True,
-                             timeout=timeout, start_new_session=True, stdin=subprocess.DEVNULL)
+                             timeout=remaining, start_new_session=True, stdin=subprocess.DEVNULL)
     finally:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
             lock_fd.close()
     if out.returncode != 0:
-        raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
+        err_lines = (out.stderr or out.stdout or "조회 실패").strip().splitlines()
+        raise RuntimeError(err_lines[-1] if err_lines else "조회 실패")   # 공백만 있는 stderr -> IndexError 방지
     return json.loads(out.stdout)
 
 
@@ -339,18 +344,25 @@ def _run_codexbar_retry(cmd, timeout):
     다른 codexbar 프로세스와 동시에 돌 때 일시적으로 실패하는 경우가 있어(관측:
     단독 실행에도 약 30~40% 확률로 발생) 1회 재시도로 흡수한다.
     subprocess.TimeoutExpired(lock 대기 중 다른 프로세스 점유로 지연돼 실제
-    실행 몫이 짧아진 경우 등)도 같은 계열 일시 실패라 재시도 대상에 포함한다."""
+    실행 몫이 짧아진 경우 등)도 같은 계열 일시 실패라 재시도 대상에 포함한다.
+
+    timeout은 락 대기 + 실행 + 재시도를 전부 합친 총 예산이다(deadline 하나를
+    공유) — 첫 시도와 재시도가 각자 timeout을 새로 받으면 최악의 경우 2배로
+    불어난다(코드리뷰 지적)."""
+    deadline = time.monotonic() + timeout
     try:
-        return _run_codexbar(cmd, timeout)
+        return _run_codexbar(cmd, deadline)
     except (RuntimeError, subprocess.TimeoutExpired):
-        time.sleep(1.5)
-        return _run_codexbar(cmd, timeout)
+        if time.monotonic() >= deadline:
+            raise
+        time.sleep(min(1.5, max(0, deadline - time.monotonic())))
+        return _run_codexbar(cmd, deadline)
 
 
 def fetch_live(provider):
     """codexbar 라이브 조회 -> usage dict. 실패 시 예외(1회 재시도 후).
 
-    timeout=60: 락으로 직렬화된 뒤에도 codexbar 단독 실행 자체가 실측 ~19초
+    timeout=60(락 대기+실행+재시도 총 예산): codexbar 단독 실행 자체가 실측 ~19초
     걸린다(claude). 40초는 여유가 얕아 부하 시 넘기기 쉬웠다(실측 4-way 동시
     실행에서 1/4 타임아웃) — 60초로 여유를 넉넉히 둔다."""
     cmd = list(LIVE_CMDS[provider])
