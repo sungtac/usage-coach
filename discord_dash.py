@@ -364,9 +364,15 @@ def _win_emoji(pct):
 
 def _provider_container(key, p):
     if not p.get("ok"):
-        return {"type": 17, "accent_color": _accent("#565B66"), "components": [
+        # coach.py가 구분해 보내는 영구 미설정(configured=False, 예: antigravity 미설치
+        # 호스트)은 일시적 조회 실패와 같은 ⚠️로 매번 알람내지 않는다(render()와 동일 정책,
+        # 코드리뷰 지적 — 예전엔 이 필드를 대시보드가 안 읽어 매 5분마다 "장애"처럼 떴다).
+        unconfigured = p.get("configured") is False
+        accent, icon = (LEVELS["white"][0], "⚪") if unconfigured else ("#565B66", "⚠️")
+        prefix = "" if unconfigured else "조회 실패 — "
+        return {"type": 17, "accent_color": _accent(accent), "components": [
             {"type": 10,
-             "content": f"### {key.title()}\n⚠️ 조회 실패 — {str(p.get('error', ''))[:120]}"}]}
+             "content": f"### {key.title()}\n{icon} {prefix}{str(p.get('error', ''))[:120]}"}]}
     level = p.get("level")
     emoji = LEVELS.get(level, ("#9AA4B2", "⚪", ""))[1]
     if level in ("green", "white"):

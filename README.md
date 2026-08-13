@@ -47,7 +47,7 @@ coach --account antigravity:foo@gmail.com  # 계정 지정(codexbar --account �
 coach --json                             # 머신 출력(JSON 1줄) — 에이전트 루프용
 ```
 
-codexbar 제약: `--provider all`은 hang하므로 provider별로 따로 조회한다(coach가 자동 처리). codex는 `--source auto`(app-server가 ephemeral 모드인 환경에서 `cli` RPC가 타임아웃나는 문제 때문 — oauth 경로로 폴백). codexbar는 동시 실행 시에도 잠금/행이 걸리므로 coach.py 프로세스 간에는 파일 락(`~/.config/usage-coach/codexbar.lock`)으로 직렬화하고, 일시 실패·타임아웃은 1회 재시도한다(락 대기 최대 60초, 실행당 타임아웃 60초 — 그래도 안 잡히면 fail-open으로 건너뛴다).
+codexbar 제약: `--provider all`은 hang하므로 provider별로 따로 조회한다(coach가 자동 처리). codex는 `--source auto`(app-server가 ephemeral 모드인 환경에서 `cli` RPC가 타임아웃나는 문제 때문 — oauth 경로로 폴백). codexbar는 동시 실행 시에도 잠금/행이 걸리므로 coach.py 프로세스 간에는 파일 락(`~/.config/usage-coach/codexbar.lock`)으로 직렬화하고, 일시 실패·타임아웃은 1회 재시도한다(락 대기 최대 60초, 실행당 타임아웃은 단일 계정 조회 45초·전 계정 조회 90초 — 그래도 안 잡히면 fail-open으로 건너뛴다).
 
 계정 미등록(해당 호스트에 그 provider 앱·계정이 아예 없는 영구 상태, 예: antigravity 미설치)은 재시도로 안 풀리는 별도 상태라 일시 실패(⚠️)와 구분해 ⚪로 표시한다(JSON은 `configured: false`).
 

@@ -39,6 +39,10 @@ WEEKLY_MINUTES = 10080   # 7일 윈도우. 가드는 이 윈도우만 본다(5h�
 # 걸린다(실측: claude 단독 조회도 이 경합 중엔 실패). _run_codexbar가 사용.
 CODEXBAR_LOCK_PATH = os.path.expanduser("~/.config/usage-coach/codexbar.lock")
 
+# codexbar가 계정 미등록 호스트에서 내는 에러 문구 — 재시도로 못 고치는 영구 상태
+# 판별에 쓴다(_run_codexbar_retry·gather_one 두 곳에서 공유, 코드리뷰 지적으로 상수화).
+NO_ACCOUNTS_MSG = "No token accounts configured"
+
 # 라이브 조회 명령 (provider별 별도 — `--provider all`은 hang)
 # codex는 --source auto(oauth 우선, 필요시 web/cli로 폴백). 예전엔 --source cli로
 # 고정했었는데, cli는 codex의 app-server RPC(account/rateLimits/read)를 거쳐서
@@ -336,7 +340,12 @@ def _run_codexbar(cmd, lock_deadline, exec_timeout):
     if out.returncode != 0:
         err_lines = (out.stderr or out.stdout or "조회 실패").strip().splitlines()
         raise RuntimeError(err_lines[-1] if err_lines else "조회 실패")   # 공백만 있는 stderr -> IndexError 방지
-    return json.loads(out.stdout)
+    try:
+        return json.loads(out.stdout)
+    except ValueError as e:
+        # returncode==0인데 stdout이 잘렸거나 깨진 경우(락 경합 등) — RuntimeError로
+        # 통일해 _run_codexbar_retry의 기존 재시도 경로를 그대로 탄다(코드리뷰 지적).
+        raise RuntimeError(f"응답 파싱 실패: {e}") from e
 
 
 def _run_codexbar_retry(cmd, lock_timeout, exec_timeout):
@@ -352,7 +361,12 @@ def _run_codexbar_retry(cmd, lock_timeout, exec_timeout):
     까지 갔던 문제, 코드리뷰 지적). exec_timeout은 최초·재시도 둘 다 풀타임 유지."""
     try:
         return _run_codexbar(cmd, time.monotonic() + lock_timeout, exec_timeout)
-    except (RuntimeError, subprocess.TimeoutExpired):
+    except RuntimeError as e:
+        if NO_ACCOUNTS_MSG in str(e):
+            raise   # 영구 실패 — 재시도해도 같은 결과라 예산만 낭비한다(코드리뷰 지적)
+        time.sleep(1.5)
+        return _run_codexbar(cmd, time.monotonic() + 10, exec_timeout)
+    except subprocess.TimeoutExpired:
         time.sleep(1.5)
         return _run_codexbar(cmd, time.monotonic() + 10, exec_timeout)
 
@@ -522,7 +536,16 @@ def gather_one(source):
     label, kind, arg = source
     try:
         if kind == "live-all":
-            return gather_all_accounts(label)
+            try:
+                return gather_all_accounts(label)
+            except Exception as e:
+                if NO_ACCOUNTS_MSG not in str(e):
+                    raise
+                # 전 계정 열거용 토큰 레지스트리가 없는 환경(단일 세션만 존재) —
+                # 여러 계정이 실제 등록된 환경에서는 위 gather_all_accounts가
+                # 정상 동작하므로, 이 폴백은 레지스트리 부재 시에만 단일조회로
+                # 내려간다. load_usage(kind="live", ...)와 동일한 기본 세션 호출.
+                kind = "live"
         usage = load_usage(kind, arg)
         emoji, action, detail = classify(label, usage)
         wins = windows_summary(usage)
@@ -542,7 +565,7 @@ def gather_one(source):
         return {"label": label, "ok": False, "msg": "조회 시간초과(hang?) — 건너뜀"}
     except Exception as e:
         msg = str(e)
-        if "No token accounts configured" in msg:
+        if NO_ACCOUNTS_MSG in msg:
             # 계정 미등록 — 재시도·락으로 못 고치는 영구 상태(예: 이 호스트에 앱 자체가
             # 없음). 일시적 조회 실패(⚠️)와 같이 취급하면 대시보드가 매번 "장애"처럼
             # 알람을 내서 실제 장애 신호를 묻히게 한다 — ⚪(미설정)로 구분한다.
