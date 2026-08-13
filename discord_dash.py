@@ -134,6 +134,7 @@ CLAUDE_BOTS_DEFAULT = [
 CODEX_SESSIONS_ROOT = os.path.expanduser("~/.codex/sessions")
 CODEX_BASELINE = 12000   # codex TUI가 컨텍스트 % 계산에서 제외하는 기본 오버헤드 토큰
 FOLDER_BOTS_PATH = os.path.expanduser("~/.config/folder-bot/bots.json")
+GEMINI_HISTORY_PATH = os.path.expanduser("~/.gemini/antigravity-cli/history.jsonl")
 
 
 def _folder_bots():
@@ -204,6 +205,33 @@ def _codex_latest(workdir):
     return None, None, None
 
 
+def _agy_latest(workdir):
+    """workdir에서 가장 최근 활동한 Antigravity CLI(agy/Gemini) 대화 -> (used=None, ts, model=None).
+
+    history.jsonl은 프롬프트 텍스트·workspace·timestamp(ms)만 남기고 토큰/컨텍스트 사용량
+    필드가 없다(실측, tasks/bot-session-identity 후속) — codex처럼 ctx%는 못 채우지만
+    마지막 활동 시각만이라도 채운다."""
+    try:
+        size = os.path.getsize(GEMINI_HISTORY_PATH)
+        with open(GEMINI_HISTORY_PATH, "rb") as f:
+            f.seek(max(0, size - 262144))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None, None, None
+    latest_ms = None
+    for line in tail.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue   # seek 지점이 줄 중간이면 첫 줄이 깨질 수 있음(codex_latest와 동일하게 허용)
+        if entry.get("workspace") != workdir:
+            continue
+        ts_ms = entry.get("timestamp")
+        if isinstance(ts_ms, (int, float)) and (latest_ms is None or ts_ms > latest_ms):
+            latest_ms = ts_ms
+    return (None, latest_ms / 1000, None) if latest_ms is not None else (None, None, None)
+
+
 def _env_var(path, name):
     try:
         for line in open(os.path.expanduser(path)):
@@ -242,6 +270,8 @@ def collect_bots(config):
         used, ts, model = (None, None, None)
         if b["kind"] == "codex" and workdir_abs:
             used, ts, model = _codex_latest(workdir_abs)
+        elif b["kind"] == "agy" and workdir_abs:
+            used, ts, model = _agy_latest(workdir_abs)
         rows.append({"label": _shorten_home(workdir_abs) or "?",
                      "tag": model or b["name"], "kind": b["kind"],
                      "used": used, "ts": ts,
