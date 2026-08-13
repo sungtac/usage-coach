@@ -33,10 +33,13 @@ if sid:
     try:
         os.makedirs(snap_dir, exist_ok=True)
         with open(os.path.join(snap_dir, f"{sid}.json"), "w") as f:
+            # bot_name: 런처가 심어주는 봇 식별자 — 같은 작업폴더를 쓰는 여러 봇을
+            # 대시보드가 구분해 표시하는 데 쓴다(tasks/bot-session-identity, discord-multiagent repo).
             json.dump({"cwd": cwd,
                        "project_dir": ws.get("project_dir") or cwd,
                        "model": model, "used": used,
-                       "ts": int(time.time())}, f)
+                       "ts": int(time.time()),
+                       "bot_name": os.environ.get("CLAUDE_BOT_NAME") or ""}, f)
     except OSError:
         pass
 PY

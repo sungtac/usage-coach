@@ -252,9 +252,15 @@ def collect_bots(config):
         cwd = _shorten_home(os.path.expanduser(cb["cwd"]))
         # project_dir(세션을 띄운 폴더) 우선 — 봇이 tasks/ 하위로 cd 해도 행이 끊기지 않는다.
         # project_dir이 없는 옛 스냅샷은 cwd로 폴백.
-        best = max((s for s in snaps if (s.get("project_dir") or s.get("cwd")) == cwd),
+        # bot_name(선택): 같은 폴더에서 여러 클로드 봇이 도는 구성(예: 오케+수다)은 폴더만으론
+        # 구분이 안 돼 최근 스냅샷 하나가 다른 봇 것을 가려버린다 — 지정돼 있으면 스냅샷의
+        # bot_name(런처가 CLAUDE_BOT_NAME으로 심음)까지 같이 맞춘다(tasks/bot-session-identity).
+        bot_name = cb.get("bot_name")
+        best = max((s for s in snaps if (s.get("project_dir") or s.get("cwd")) == cwd
+                    and (not bot_name or s.get("bot_name") == bot_name)),
                    key=lambda s: s.get("ts") or 0, default=None)
-        rows.append({"label": cwd,
+        label = f"{cwd} ({bot_name})" if bot_name else cwd
+        rows.append({"label": label,
                      "tag": (best or {}).get("model") or cb.get("name", "Claude"),
                      "kind": "claude",
                      "used": (best or {}).get("used"),
