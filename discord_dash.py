@@ -484,16 +484,24 @@ def build_components(payload, bots):
 
 # ---------------------------------------------------------------- 디스코드 웹훅
 
-def _request(url, method, payload_json):
+def _request(url, method, payload_json, _retries=3):
     data = None if payload_json is None else json.dumps(payload_json,
                                                         ensure_ascii=False).encode()
     headers = {"User-Agent": "usage-coach-dash"}
     if data is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        raw = r.read()
-    return json.loads(raw) if raw else {}
+    for attempt in range(_retries):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                raw = r.read()
+            return json.loads(raw) if raw else {}
+        except urllib.error.URLError as e:
+            # WSL/Tailscale의 resolv.conf 쟁탈전으로 인한 일시적 DNS 실패 완화
+            if isinstance(e.reason, OSError) and attempt < _retries - 1:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
 
 
 def upsert_card(webhook, components, state, force_new=False):
@@ -627,7 +635,14 @@ def main():
 
     state = load_state()
     state["last_levels"] = ping_if_worse(webhook, payload, state)
-    state["message_id"] = upsert_card(webhook, components, state, args.force_new)
+    try:
+        state["message_id"] = upsert_card(webhook, components, state, args.force_new)
+    except Exception as e:
+        # last_levels 갱신은 그대로 저장 — 안 하면 다음 주기에 같은 악화를 다시 감지해
+        # ping_if_worse가 중복 알림을 보낸다(2026-08-13 코드리뷰 지적).
+        save_state(state)
+        print(f"카드 갱신 실패: {e}", file=sys.stderr)
+        return 1
     save_state(state)
     return 0
 
