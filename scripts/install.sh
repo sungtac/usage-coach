@@ -33,9 +33,29 @@ cat > "$PLIST" <<EOF
 </dict></plist>
 EOF
 
+TELEGRAM_LABEL="com.usage-coach.telegram-dashboard"
+TELEGRAM_PLIST="$HOME/Library/LaunchAgents/$TELEGRAM_LABEL.plist"
+cat > "$TELEGRAM_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$TELEGRAM_LABEL</string>
+  <key>ProgramArguments</key><array>
+    <string>$PYTHON_BIN</string>
+    <string>$DIR/telegram_dash.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>$PATH_ESC</string></dict>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+EOF
+
 if [[ "${DRY_RUN:-0}" != "1" ]]; then
   UID_N=$(id -u)
   launchctl bootout "gui/$UID_N/$LABEL" 2>/dev/null || true
+  launchctl bootout "gui/$UID_N/$TELEGRAM_LABEL" 2>/dev/null || true
   launchctl bootstrap "gui/$UID_N" "$PLIST"
+  launchctl bootstrap "gui/$UID_N" "$TELEGRAM_PLIST"
 fi
-echo "설치됨: $PLIST (5분 간격)"
+echo "설치됨: $PLIST, $TELEGRAM_PLIST (5분 간격)"

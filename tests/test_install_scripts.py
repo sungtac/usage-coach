@@ -25,6 +25,16 @@ def test_install_writes_plist(tmp_path):
     # launchd 기본 PATH엔 /usr/local/bin 이 없어 codexbar 호출이 죽는다 — 설치 시점 PATH 주입
     assert data["EnvironmentVariables"]["PATH"] == os.environ["PATH"]
 
+def test_install_writes_telegram_plist(tmp_path):
+    _prep(tmp_path)
+    r = run("install.sh", tmp_path)
+    assert r.returncode == 0, r.stderr
+    p = tmp_path / "Library/LaunchAgents/com.usage-coach.telegram-dashboard.plist"
+    data = plistlib.loads(p.read_bytes())
+    assert data["Label"] == "com.usage-coach.telegram-dashboard"
+    assert data["ProgramArguments"][1].endswith("telegram_dash.py")
+    assert data["EnvironmentVariables"]["PATH"] == os.environ["PATH"]
+
 def test_install_fails_without_webhook_config(tmp_path):
     (tmp_path / "Library/LaunchAgents").mkdir(parents=True)
     r = run("install.sh", tmp_path)
@@ -38,6 +48,13 @@ def test_uninstall_removes_plist_and_keeps_config(tmp_path):
     assert r.returncode == 0, r.stderr
     assert not (tmp_path / "Library/LaunchAgents/com.usage-coach.dashboard.plist").exists()
     assert (tmp_path / ".config/usage-coach/discord.json").exists()
+
+def test_uninstall_removes_telegram_plist(tmp_path):
+    _prep(tmp_path)
+    run("install.sh", tmp_path)
+    r = run("uninstall.sh", tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "Library/LaunchAgents/com.usage-coach.telegram-dashboard.plist").exists()
 
 
 def test_statusline_writes_snapshot_and_renders(tmp_path):

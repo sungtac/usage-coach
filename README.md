@@ -93,6 +93,20 @@ python3 discord_dash.py                     # 조회→조립→웹훅 업서트
 
 설정: `~/.config/usage-coach/discord.json`에 `{"webhook_url": "..."}` (또는 env `DISCORD_WEBHOOK_URL`). 같은 파일의 `"coach_args": ["--account", "antigravity:foo@gmail.com"]`로 대시보드가 추적할 계정을 고정할 수 있다(카드에 계정 이메일 표시됨). 여러 계정을 오가는 provider는 `"all_accounts"`(기본 `["antigravity"]`)에 넣으면 codexbar `--all-accounts`로 **등록된 전 계정을 계정별 바로 표시**하고, 코칭·본문·핑은 가장 여유 있는 계정 기준으로 잡는다(끄려면 `"all_accounts": []`). 상태(메시지 ID·직전 level)는 `discord-state.json`에 저장. 주기 실행은 LaunchAgent 등으로 5분 간격 권장(웹훅만 쓰므로 봇 토큰·gateway 불필요).
 
+## 텔레그램 대시보드 (`telegram_dash.py`)
+
+Discord 대시보드와 같은 coach 사용량·코칭 정보를 Telegram HTML 텍스트 카드 하나로 표시하고, 기존 메시지를 계속 편집한다. level이 🟡/🔴로 나빠질 때만 별도 푸시를 보낸다.
+
+- 설정 = `~/.config/usage-coach/telegram.json`, 상태 = `~/.config/usage-coach/telegram-state.json`. 기본값은 이미 운영 중인 Claude 봇 토큰 파일 `~/.edge-agent/secrets/telegram/claude.token`과 채팅 `-1003952617795`를 재사용한다. `--token`/`--chat-id` 또는 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`로 덮어쓸 수 있다.
+- `--out`은 Bot API를 호출하지 않고 카드 텍스트만 저장한다. 토큰·채팅 ID는 CLI 인자, 환경변수, 설정 파일, 기본값 순서다.
+
+```bash
+python3 telegram_dash.py --mock all --out t.txt  # API 없이 검증
+python3 telegram_dash.py                       # 조회→Telegram 업서트(+악화 핑)
+```
+
+주기 실행은 `scripts/install.sh`가 설치 시점의 PATH를 포함한 두 LaunchAgent를 생성한다. 실행 전 `DRY_RUN=1 scripts/install.sh`로 생성 내용을 검토할 수 있다.
+
 ## 라이선스
 
 [MIT](./LICENSE)

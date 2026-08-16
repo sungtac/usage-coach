@@ -116,6 +116,28 @@ def _primary_window(windows):
     return next(iter(windows), None)
 
 
+def build_coach_extra_args(args, config):
+    """Build coach arguments and return all-accounts providers to merge."""
+    extra = list(config.get("coach_args", []))
+    if args.mock:
+        extra += ["--mock", args.mock]
+    for fspec in args.file:
+        extra += ["--file", fspec]
+    for aspec in args.account:
+        extra += ["--account", aspec]
+
+    provs_csv = args.providers or "claude,codex,antigravity"
+    live = not (args.mock or args.file)
+    multi_provs = ([p for p in config.get("all_accounts", ["antigravity"])
+                    if p in provs_csv.split(",")] if live else [])
+    if live:
+        single = [p for p in provs_csv.split(",") if p.strip() and p not in multi_provs]
+        extra += ["--providers", ",".join(single)]
+    elif args.providers:
+        extra += ["--providers", args.providers]
+    return extra, multi_provs
+
+
 # ---------------------------------------------------------------- Components V2 조립
 
 BAR_W = 14
@@ -316,25 +338,7 @@ def main():
     args = ap.parse_args()
 
     config = load_config()
-    extra = list(config.get("coach_args", []))   # 예: ["--account", "antigravity:foo@gmail.com"]
-    if args.mock:
-        extra += ["--mock", args.mock]
-    for fspec in args.file:
-        extra += ["--file", fspec]
-    for aspec in args.account:
-        extra += ["--account", aspec]
-
-    # all_accounts 대상 provider(기본 antigravity)는 coach 단일 조회에서 빼고
-    # codexbar --all-accounts로 전 계정을 따로 채운다 (mock/file 모드에선 미적용)
-    provs_csv = args.providers or "claude,codex,antigravity"
-    live = not (args.mock or args.file)
-    multi_provs = ([p for p in config.get("all_accounts", ["antigravity"])
-                    if p in provs_csv.split(",")] if live else [])
-    if live:
-        single = [p for p in provs_csv.split(",") if p.strip() and p not in multi_provs]
-        extra += ["--providers", ",".join(single)]
-    elif args.providers:
-        extra += ["--providers", args.providers]
+    extra, multi_provs = build_coach_extra_args(args, config)
 
     payload = fetch_payload(extra)
     if multi_provs:
