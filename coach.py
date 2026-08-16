@@ -344,6 +344,18 @@ def load_file(path):
         return json.load(f)[0]["usage"]
 
 
+def _claude_cli_account_email():
+    """Claude Code CLI 로그인 계정 이메일을 best-effort로 반환한다."""
+    try:
+        with open(os.path.expanduser("~/.claude.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        account = data.get("oauthAccount")
+        email = account.get("emailAddress") if isinstance(account, dict) else None
+        return email if isinstance(email, str) and email else None
+    except (OSError, TypeError, ValueError, AttributeError):
+        return None
+
+
 def _mock_window(left, mins, wm):
     resets = (now_utc() + dt.timedelta(minutes=mins)).isoformat().replace("+00:00", "Z")
     return {"usedPercent": round((1 - left) * 100), "windowMinutes": wm, "resetsAt": resets}
@@ -485,9 +497,12 @@ def gather_one(source):
         fable = fable_window(usage)
         if fable:
             wins.append(fable)     # 표시 전용 추가 — classify에는 미반영
+        email = usage.get("accountEmail")
+        if label == "claude" and not email:
+            email = _claude_cli_account_email()
         return {
             "label": label, "ok": True,
-            "email": usage.get("accountEmail"),
+            "email": email,
             "plan": usage.get("loginMethod"),
             "windows": wins,
             "emoji": emoji, "action": action, "detail": detail,

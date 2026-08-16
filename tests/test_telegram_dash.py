@@ -8,10 +8,57 @@ from datetime import datetime
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import coach
 import telegram_dash
 
 
 class TelegramDashTests(unittest.TestCase):
+    def _claude_config_email(self, contents):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as stream:
+            if contents is not None:
+                stream.write(contents)
+                stream.flush()
+            expanduser = lambda path: stream.name if path == "~/.claude.json" else path
+            with patch.object(coach.os.path, "expanduser", side_effect=expanduser):
+                return coach._claude_cli_account_email()
+
+    def test_claude_cli_account_email_reads_oauth_account(self):
+        email = self._claude_config_email(json.dumps({
+            "oauthAccount": {"emailAddress": "edgeai3613@gmail.com", "accountUuid": "secret"}
+        }))
+        self.assertEqual(email, "edgeai3613@gmail.com")
+
+    def test_claude_cli_account_email_returns_none_for_missing_file(self):
+        with patch.object(coach.os.path, "expanduser", return_value="/does/not/exist"):
+            self.assertIsNone(coach._claude_cli_account_email())
+
+    def test_claude_cli_account_email_returns_none_for_invalid_json(self):
+        self.assertIsNone(self._claude_config_email("{"))
+
+    def test_claude_cli_account_email_returns_none_for_missing_keys(self):
+        for contents in ({}, {"oauthAccount": {}}, {"oauthAccount": {"emailAddress": ""}}):
+            with self.subTest(contents=contents):
+                self.assertIsNone(self._claude_config_email(json.dumps(contents)))
+
+    def test_gather_one_prefers_codexbar_account_email(self):
+        usage = {"accountEmail": "codexbar@example.com"}
+        with patch.object(coach, "load_usage", return_value=usage), \
+             patch.object(coach, "classify", return_value=("🟢", "ok", "fine")), \
+             patch.object(coach, "windows_summary", return_value=[]), \
+             patch.object(coach, "fable_window", return_value=None), \
+             patch.object(coach, "_claude_cli_account_email", return_value="cli@example.com"):
+            result = coach.gather_one(("claude", "live", "claude"))
+        self.assertEqual(result["email"], "codexbar@example.com")
+
+    def test_gather_one_fills_missing_claude_email_from_cli_config(self):
+        with patch.object(coach, "load_usage", return_value={}), \
+             patch.object(coach, "classify", return_value=("🟢", "ok", "fine")), \
+             patch.object(coach, "windows_summary", return_value=[]), \
+             patch.object(coach, "fable_window", return_value=None), \
+             patch.object(coach, "_claude_cli_account_email", return_value="cli@example.com"):
+            result = coach.gather_one(("claude", "live", "claude"))
+        self.assertEqual(result["email"], "cli@example.com")
+
     def test_coach_args_are_built_by_shared_helper(self):
         args = SimpleNamespace(mock=None, file=[], account=[], providers=None)
         extra, multi = telegram_dash.build_coach_extra_args(
