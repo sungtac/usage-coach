@@ -2,7 +2,9 @@
 # source해서 쓴다(직접 실행 대상 아님). 코드리뷰 지적: 이 로직이 두 스크립트에 거의
 # 그대로 복붙돼 있어 한쪽만 고치면 다른 쪽이 뒤처질 위험이 있었다.
 fail() { echo "오류: $*" >&2; exit 1; }
-MARKER="# usage-coach-dashboard"
+# 호출 스크립트가 source 전에 MARKER를 미리 정해뒀으면(예: mattermost 전용 마커) 그대로 두고,
+# 없을 때만 기본값(디스코드)을 채운다 — 여러 대시보드가 같은 crontab에 각자 마커로 공존.
+MARKER="${MARKER:-# usage-coach-dashboard}"
 
 # 테스트 훅: CRONTAB_FILE 이 설정되면 실제 `crontab` 명령 대신 그 파일을 읽고 쓴다
 # (진짜 사용자 crontab을 실수로 건드리지 않고 검증하기 위함). 미설정 시 실제 crontab 사용.
