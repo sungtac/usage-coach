@@ -29,6 +29,7 @@ COACH = Path(__file__).with_name("coach.py")
 CONFIG_PATH = os.path.expanduser("~/.config/usage-coach/discord.json")
 STATE_PATH = os.path.expanduser("~/.config/usage-coach/discord-state.json")
 SESSIONS_DIR = os.path.expanduser("~/.config/usage-coach/sessions")
+COACH_CACHE_PATH = os.path.expanduser("~/.config/usage-coach/coach-cache.json")
 USERNAME = "dashboard"
 FLAG_COMPONENTS_V2 = 32768   # 1 << 15
 
@@ -540,10 +541,15 @@ def ping_if_worse(webhook, payload, state):
             who = key.title()
             if p.get("email"):
                 who += f"({p['email'].split('@', 1)[0]})"
-            _request(webhook, "POST", {
-                "username": USERNAME,
-                "content": f"{emoji} **{who}** {verdict} — {p.get('action', '')}",
-            })
+            try:
+                _request(webhook, "POST", {
+                    "username": USERNAME,
+                    "content": f"{emoji} **{who}** {verdict} — {p.get('action', '')}",
+                })
+            except Exception as e:
+                # 여기서 죽으면 now가 반환/저장되지 않아 다음 주기에 같은 전이를
+                # 다시 악화로 오인해 중복 알림을 보낸다 — 실패해도 계속 진행.
+                print(f"핑 전송 실패({key}): {e}", file=sys.stderr)
     return now
 
 
@@ -563,6 +569,17 @@ def load_webhook(cli_value, config):
     if os.environ.get("DISCORD_WEBHOOK_URL"):
         return os.environ["DISCORD_WEBHOOK_URL"]
     return config.get("webhook_url")
+
+
+def write_coach_cache(payload):
+    """statusline이 coach를 직접 호출(수~수십 초)하지 않고 즉시 읽을 수 있도록,
+    이 크론이 이미 가져온 payload를 캐시 파일로 남긴다(최대 크론 주기만큼 stale)."""
+    try:
+        os.makedirs(os.path.dirname(COACH_CACHE_PATH), exist_ok=True)
+        with open(COACH_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"payload": payload, "ts": int(time.time())}, f, ensure_ascii=False)
+    except OSError:
+        pass
 
 
 def load_state():
@@ -618,6 +635,8 @@ def main():
     payload = fetch_payload(extra)
     if multi_provs:
         merge_all_accounts(payload, multi_provs, config)
+    if live:
+        write_coach_cache(payload)
 
     components = build_components(payload, collect_bots(config))
 
