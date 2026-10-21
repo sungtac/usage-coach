@@ -56,14 +56,26 @@ def _reset_text(minutes):
     return "곧 초기화" if round(minutes) < 1 else f"{_duration(minutes)} 후"
 
 
+def _tg_len(text):
+    """Telegram 길이 단위 = UTF-16 code unit(🔴 같은 이모지는 2)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _plain_truncate(text):
     """길이 초과 시 태그를 제거한 안전한 HTML 텍스트로 줄인다."""
-    if len(text) <= MAX_TEXT:
+    if _tg_len(text) <= MAX_TEXT:
         return text
     plain = html.unescape(re.sub(r"<[^>]*>", "", text))
     # 이스케이프 전에 자른다 — 이스케이프 후 자르면 "&amp;"가 "&am"으로 끊겨 Telegram이
-    # 엔티티 파싱 오류(400)로 편집·발송을 모두 거부한다. 길이 한도는 엔티티 파싱 후 기준.
-    return html.escape(plain[:MAX_TEXT - 3], quote=False) + "..."
+    # 엔티티 파싱 오류(400)로 편집·발송을 모두 거부한다. 길이 한도는 엔티티 파싱 후 기준이며
+    # UTF-16 단위로 센다(코드포인트로 자르면 이모지 많은 카드가 4096을 넘어 400).
+    budget, cut = MAX_TEXT - 3, 0
+    for ch in plain:
+        budget -= _tg_len(ch)
+        if budget < 0:
+            break
+        cut += 1
+    return html.escape(plain[:cut], quote=False) + "..."
 
 
 def _window_line(code, info, width=None):
@@ -168,7 +180,10 @@ def ping_if_worse(token, chat_id, payload, state):
     last = state.get("last_levels", {})
     current = {}
     for key, provider in payload.get("providers", {}).items():
-        level = provider.get("level") if provider.get("ok") else None
+        if not provider.get("ok"):
+            current[key] = last.get(key)   # 일시적 조회 실패는 직전 level 유지(악화 핑 누락 방지)
+            continue
+        level = provider.get("level")
         current[key] = level
         if level not in ("yellow", "red"):
             continue

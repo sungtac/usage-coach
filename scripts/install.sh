@@ -24,11 +24,18 @@ mkdir -p "$HOME/Library/LaunchAgents"
 # 설치 시점의 완전한 PATH를 굽는다 — launchd 기본 PATH에는 /usr/local/bin 등이 없어
 # coach.py의 codexbar 호출이 Errno 2로 죽는다 (2026-08-04 E2E 실측)
 # plist는 XML이므로 & 뿐 아니라 < > " 까지 모두 이스케이프한다(& 먼저).
-PATH_ESC="$PATH"
-PATH_ESC="${PATH_ESC//&/&amp;}"
-PATH_ESC="${PATH_ESC//</&lt;}"
-PATH_ESC="${PATH_ESC//>/&gt;}"
-PATH_ESC="${PATH_ESC//\"/&quot;}"
+# PATH뿐 아니라 저장소 경로($DIR, 예: ~/R&D/usage-coach)·PYTHON_BIN 도 plist에 들어가므로 같이 이스케이프.
+xml_esc() {
+  local v="$1"
+  v="${v//&/&amp;}"
+  v="${v//</&lt;}"
+  v="${v//>/&gt;}"
+  v="${v//\"/&quot;}"
+  printf '%s' "$v"
+}
+PATH_ESC="$(xml_esc "$PATH")"
+DIR_ESC="$(xml_esc "$DIR")"
+PYTHON_ESC="$(xml_esc "$PYTHON_BIN")"
 
 LABEL="com.usage-coach.dashboard"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -43,8 +50,8 @@ write_plist() {
 <plist version="1.0"><dict>
   <key>Label</key><string>$1</string>
   <key>ProgramArguments</key><array>
-    <string>$PYTHON_BIN</string>
-    <string>$DIR/$3</string>
+    <string>$PYTHON_ESC</string>
+    <string>$DIR_ESC/$3</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>$PATH_ESC</string></dict>
