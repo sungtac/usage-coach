@@ -28,6 +28,10 @@ WATCH_INTERVAL = 30   # watch 모드 기본 자동 갱신 주기(초)
 GUARD_CONFIG_PATH = os.path.expanduser("~/.config/usage-coach/guard.json")
 # 벤더 무관 런타임 스위치. 존재=on, 부재=off (`coach guard on|off`로 토글).
 GUARD_ENABLED_PATH = os.path.expanduser("~/.config/usage-coach/guard-enabled")
+# 옵트인 strict 모드: 기본은 fail-open(조회 실패=통과)이지만, 이 스위치가 켜지면
+# 사용량을 '확인할 수 없을 때' 정지한다(fail-closed). env COACH_GUARD_STRICT
+# (1/true/yes/on) 또는 플래그 파일 존재로 켜진다. 부재/미설정이면 기존 fail-open 유지.
+GUARD_STRICT_PATH = os.path.expanduser("~/.config/usage-coach/guard-strict")
 GUARD_DEFAULT = {"m": 0.10, "floor": 0.10, "pace": True}   # provider별 기본: 페이스 마진 / 절대 하한 / 페이스 게이트 on
 GUARD_TARGETS = ["claude", "codex", "antigravity"]   # 가드 대상(gemini == antigravity)
 WEEKLY_MINUTES = 10080   # 7일 윈도우. 가드는 이 윈도우만 본다(5h는 무시).
@@ -520,13 +524,16 @@ def load_guard_config(path=GUARD_CONFIG_PATH):
     return cfg
 
 
-def guard_check(sources, cfg):
+def guard_check(sources, cfg, strict=False):
     """7일 윈도우 하이브리드 OR 가드. -> stopReason(str) 또는 None(통과).
 
     정지 조건(provider별, 하나라도 걸리면 정지):
       left < timeLeft − m   (pace: 너무 빨리 태움 — pace:false면 건너뜀)
       OR left < floor       (absolute: 바닥 임박)
-    fail-open: 조회 실패 / 7일 windowMinutes 없음 → 그 provider는 정지에 기여 안 함.
+    기본 fail-open: 조회 실패 / 7일 windowMinutes 없음 → 그 provider는 정지에 기여 안 함.
+    strict=True(옵트인): 조회 자체가 실패해 사용량을 확인할 수 없으면 fail-open 대신
+      정지한다(fail-closed). 7일 윈도우가 없는 경우(= 한도 없음이 확인됨)는 strict에서도
+      정지하지 않는다 — '못 봄'과 '볼 게 없음'을 구분한다.
     """
     triggers = []
     for label, kind, arg in sources:
@@ -534,7 +541,9 @@ def guard_check(sources, cfg):
             usage = load_usage(kind, arg)
             w = pick(usage, WEEKLY_MINUTES)     # 7일만 — 5h는 보지 않음
         except Exception:
-            continue                            # 조회 실패 → fail-open
+            if strict:
+                triggers.append(f"{label} 사용량 조회 실패 — strict 모드이므로 정지(사용량 확인 불가)")
+            continue                            # 조회 실패 → 기본 fail-open(strict면 위에서 정지 기여)
         if not w:
             continue                            # 7일 윈도우 없음/무효 → fail-open
         c = cfg.get(label, GUARD_DEFAULT)
@@ -573,6 +582,14 @@ def guard_enabled():
     return os.path.exists(GUARD_ENABLED_PATH)
 
 
+def guard_strict():
+    """strict 모드(옵트인) 여부. env COACH_GUARD_STRICT(1/true/yes/on) 또는 플래그 파일.
+    미설정/부재면 False → 기존 fail-open 동작 유지."""
+    if os.environ.get("COACH_GUARD_STRICT", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    return os.path.exists(GUARD_STRICT_PATH)
+
+
 def set_guard(on):
     """런타임 스위치 토글. on→플래그 파일 생성(부모 mkdir 포함) / off→삭제.
 
@@ -607,7 +624,7 @@ def run_guard_cmd(action, sources):
         print(f"요금가드: {state}")
         # 지금이면 어떻게 판정되는지 라이브 미리보기(스위치 상태와 무관하게 항상 보여줌).
         try:
-            reason = guard_check(sources, load_guard_config())
+            reason = guard_check(sources, load_guard_config(), strict=guard_strict())
         except Exception:
             reason = None                           # 조회 오류 → 미리보기 생략(fail-open)
         if reason:
@@ -628,7 +645,7 @@ def run_hook(sources):
     event = read_hook_event()                       # stdin 이벤트 소비 + 값 사용
     if not event.get("stop_hook_active"):
         return                                      # 루프 턴 아님 → 통과(무출력)
-    reason = guard_check(sources, load_guard_config())
+    reason = guard_check(sources, load_guard_config(), strict=guard_strict())
     if reason:
         print(json.dumps({"continue": False, "stopReason": reason}, ensure_ascii=False))
     # 통과면 아무것도 출력하지 않는다.
@@ -642,7 +659,7 @@ def run_guard_check(sources):
     """
     if not guard_enabled():
         return 0                                    # 스위치 off → 통과(무출력)
-    reason = guard_check(sources, load_guard_config())
+    reason = guard_check(sources, load_guard_config(), strict=guard_strict())
     if reason:
         print(reason)
         return 10
