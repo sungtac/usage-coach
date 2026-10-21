@@ -29,7 +29,7 @@ Claude · Codex · Antigravity의 5시간·7일 한도를 교차 분석해 5가�
 ## 설치
 
 ```bash
-git clone https://github.com/netwaif/usage-coach.git
+git clone https://github.com/sungtac/usage-coach.git
 cd usage-coach
 # 전역 명령으로 쓰려면 심링크(선택)
 ln -s "$PWD/coach.py" /usr/local/bin/coach
