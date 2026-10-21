@@ -16,7 +16,12 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 # 설치 시점의 완전한 PATH를 굽는다 — launchd 기본 PATH에는 /usr/local/bin 등이 없어
 # coach.py의 codexbar 호출이 Errno 2로 죽는다 (2026-08-04 E2E 실측)
-PATH_ESC="${PATH//&/&amp;}"
+# plist는 XML이므로 & 뿐 아니라 < > " 까지 모두 이스케이프한다(& 먼저).
+PATH_ESC="$PATH"
+PATH_ESC="${PATH_ESC//&/&amp;}"
+PATH_ESC="${PATH_ESC//</&lt;}"
+PATH_ESC="${PATH_ESC//>/&gt;}"
+PATH_ESC="${PATH_ESC//\"/&quot;}"
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
