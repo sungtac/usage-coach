@@ -8,11 +8,15 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 [[ "$(uname)" == "Darwin" ]] || fail "macOS 전용입니다 (launchd 사용)"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 [[ -n "$PYTHON_BIN" ]] || fail "python3 를 찾을 수 없음"
-[[ -f "$HOME/.config/usage-coach/discord.json" || -n "${DISCORD_WEBHOOK_URL:-}" ]] \
-  || fail "webhook_url 미설정 — ~/.config/usage-coach/discord.json 에 {\"webhook_url\": \"...\"} 를 먼저 만드세요"
+# 대시보드별로 그 대시보드의 설정이 있을 때만 LaunchAgent 를 설치한다
+# (Discord 전용·Telegram 전용 사용자가 자기 것만 깨끗이 설치되도록). 둘 다 없으면 실패.
+DISCORD_CFG=0
+[[ -f "$HOME/.config/usage-coach/discord.json" || -n "${DISCORD_WEBHOOK_URL:-}" ]] && DISCORD_CFG=1
+TELEGRAM_CFG=0
+[[ -f "$HOME/.config/usage-coach/telegram.json" || -n "${TELEGRAM_BOT_TOKEN:-}" ]] && TELEGRAM_CFG=1
+[[ "$DISCORD_CFG" == 1 || "$TELEGRAM_CFG" == 1 ]] \
+  || fail "Discord/Telegram 설정이 없어요 — ~/.config/usage-coach/discord.json 에 {\"webhook_url\": \"...\"} 또는 telegram.json 중 하나는 먼저 만드세요"
 
-LABEL="com.usage-coach.dashboard"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 # 설치 시점의 완전한 PATH를 굽는다 — launchd 기본 PATH에는 /usr/local/bin 등이 없어
 # coach.py의 codexbar 호출이 Errno 2로 죽는다 (2026-08-04 E2E 실측)
@@ -22,32 +26,22 @@ PATH_ESC="${PATH_ESC//&/&amp;}"
 PATH_ESC="${PATH_ESC//</&lt;}"
 PATH_ESC="${PATH_ESC//>/&gt;}"
 PATH_ESC="${PATH_ESC//\"/&quot;}"
-cat > "$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array>
-    <string>$PYTHON_BIN</string>
-    <string>$DIR/discord_dash.py</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>$PATH_ESC</string></dict>
-  <key>StartInterval</key><integer>300</integer>
-  <key>RunAtLoad</key><true/>
-</dict></plist>
-EOF
 
+LABEL="com.usage-coach.dashboard"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 TELEGRAM_LABEL="com.usage-coach.telegram-dashboard"
 TELEGRAM_PLIST="$HOME/Library/LaunchAgents/$TELEGRAM_LABEL.plist"
-cat > "$TELEGRAM_PLIST" <<EOF
+
+# $1=label $2=plist경로 $3=스크립트파일 — 표준 plist 한 개를 쓴다
+write_plist() {
+  cat > "$2" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>$TELEGRAM_LABEL</string>
+  <key>Label</key><string>$1</string>
   <key>ProgramArguments</key><array>
     <string>$PYTHON_BIN</string>
-    <string>$DIR/telegram_dash.py</string>
+    <string>$DIR/$3</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>$PATH_ESC</string></dict>
@@ -55,12 +49,21 @@ cat > "$TELEGRAM_PLIST" <<EOF
   <key>RunAtLoad</key><true/>
 </dict></plist>
 EOF
+}
+
+installed=()
+[[ "$DISCORD_CFG" == 1 ]]  && { write_plist "$LABEL" "$PLIST" "discord_dash.py"; installed+=("$PLIST"); }
+[[ "$TELEGRAM_CFG" == 1 ]] && { write_plist "$TELEGRAM_LABEL" "$TELEGRAM_PLIST" "telegram_dash.py"; installed+=("$TELEGRAM_PLIST"); }
 
 if [[ "${DRY_RUN:-0}" != "1" ]]; then
   UID_N=$(id -u)
-  launchctl bootout "gui/$UID_N/$LABEL" 2>/dev/null || true
-  launchctl bootout "gui/$UID_N/$TELEGRAM_LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$UID_N" "$PLIST"
-  launchctl bootstrap "gui/$UID_N" "$TELEGRAM_PLIST"
+  if [[ "$DISCORD_CFG" == 1 ]]; then
+    launchctl bootout "gui/$UID_N/$LABEL" 2>/dev/null || true
+    launchctl bootstrap "gui/$UID_N" "$PLIST"
+  fi
+  if [[ "$TELEGRAM_CFG" == 1 ]]; then
+    launchctl bootout "gui/$UID_N/$TELEGRAM_LABEL" 2>/dev/null || true
+    launchctl bootstrap "gui/$UID_N" "$TELEGRAM_PLIST"
+  fi
 fi
-echo "설치됨: $PLIST, $TELEGRAM_PLIST (5분 간격)"
+echo "설치됨: ${installed[*]} (5분 간격)"

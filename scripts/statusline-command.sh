@@ -14,6 +14,8 @@ try:
     d = json.loads(os.environ.get("STATUSLINE_INPUT", ""))
 except ValueError:
     sys.exit(0)
+if not isinstance(d, dict):   # 유효 JSON이어도 객체가 아니면(null/숫자/배열/문자열) 데이터 없음 처리
+    sys.exit(0)
 
 ws = d.get("workspace") or {}
 cwd = ws.get("current_dir") or d.get("cwd") or ""

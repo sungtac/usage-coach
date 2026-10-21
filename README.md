@@ -97,8 +97,8 @@ python3 discord_dash.py                     # 조회→조립→웹훅 업서트
 
 Discord 대시보드와 같은 coach 사용량·코칭 정보를 Telegram HTML 텍스트 카드 하나로 표시하고, 기존 메시지를 계속 편집한다. level이 🟡/🔴로 나빠질 때만 별도 푸시를 보낸다.
 
-- 설정 = `~/.config/usage-coach/telegram.json`, 상태 = `~/.config/usage-coach/telegram-state.json`. 기본값은 이미 운영 중인 Claude 봇 토큰 파일 `~/.edge-agent/secrets/telegram/claude.token`과 채팅 `-1003952617795`를 재사용한다. `--token`/`--chat-id` 또는 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`로 덮어쓸 수 있다.
-- `--out`은 Bot API를 호출하지 않고 카드 텍스트만 저장한다. 토큰·채팅 ID는 CLI 인자, 환경변수, 설정 파일, 기본값 순서다.
+- 설정 = `~/.config/usage-coach/telegram.json`, 상태 = `~/.config/usage-coach/telegram-state.json`. 봇 토큰은 `--token` / `TELEGRAM_BOT_TOKEN` / 설정의 `bot_token` / `bot_token_file`(기본 `~/.edge-agent/secrets/telegram/claude.token`) 순서로 찾는다. 채팅 ID는 `--chat-id` / `TELEGRAM_CHAT_ID` / 설정의 `chat_id` 중 하나로 **반드시 지정**해야 하며(하드코딩 기본값 없음), 없으면 발송하지 않고 명확히 실패한다.
+- `--out`은 Bot API를 호출하지 않고 카드 텍스트만 저장한다.
 
 ```bash
 python3 telegram_dash.py --mock all --out t.txt  # API 없이 검증
