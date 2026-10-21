@@ -201,7 +201,9 @@ def win(w):
         return None
     mins = max(0.0, (resets - now_utc()).total_seconds() / 60.0)
     left = max(0.0, min(1.0, (100 - up) / 100.0))   # 범위 밖 입력 가드
-    return {"left": left, "timeLeft": mins / wm, "mins": mins, "wm": wm}
+    # 리셋은 최대 1 윈도우 뒤 → timeLeft ≤ 1.0. 손상된 먼 미래 resetsAt가 timeLeft를
+    # 1 넘게 부풀려 classify가 거짓 🔴를 내지 않도록 시간값을 클램프한다(모든 소비처 안전).
+    return {"left": left, "timeLeft": min(1.0, mins / wm), "mins": mins, "wm": wm}
 
 
 def pick(usage, minutes):

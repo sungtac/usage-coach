@@ -25,7 +25,6 @@ from discord_dash import (
 CONFIG_PATH = os.path.expanduser("~/.config/usage-coach/telegram.json")
 STATE_PATH = os.path.expanduser("~/.config/usage-coach/telegram-state.json")
 DEFAULT_TOKEN_FILE = os.path.expanduser("~/.edge-agent/secrets/telegram/claude.token")
-DEFAULT_CHAT_ID = "-1003952617795"
 MAX_TEXT = 4096
 API_ROOT = "https://api.telegram.org/bot"
 
@@ -201,8 +200,10 @@ def load_state():
 
 def save_state(state):
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-    with open(STATE_PATH, "w", encoding="utf-8") as stream:
+    tmp = STATE_PATH + ".tmp"   # 같은 디렉토리 임시파일 + os.replace 로 원자적 교체(부분쓰기 방지)
+    with open(tmp, "w", encoding="utf-8") as stream:
         json.dump(state, stream, ensure_ascii=False, indent=1)
+    os.replace(tmp, STATE_PATH)
 
 
 def _load_token(cli_value, config):
@@ -248,9 +249,14 @@ def main():
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    chat_id = args.chat_id or os.environ.get("TELEGRAM_CHAT_ID") or config.get("chat_id", DEFAULT_CHAT_ID)
+    chat_id = args.chat_id or os.environ.get("TELEGRAM_CHAT_ID") or config.get("chat_id")
+    if not chat_id:
+        print("채팅 ID가 없어요. --chat-id / TELEGRAM_CHAT_ID / telegram.json 의 chat_id 중 "
+              "하나로 지정하세요.", file=sys.stderr)
+        return 2
     state = load_state()
     state["last_levels"] = ping_if_worse(token, chat_id, payload, state)
+    save_state(state)   # 핑 상태를 먼저 영속화 — 카드 편집이 실패해도 같은 전이가 재핑되지 않도록
     state["message_id"] = upsert_card(token, chat_id, card, state, args.force_new)
     save_state(state)
     return 0

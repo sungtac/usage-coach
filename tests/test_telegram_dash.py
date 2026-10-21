@@ -169,6 +169,34 @@ class TelegramDashTests(unittest.TestCase):
              patch.object(telegram_dash, "fetch_payload", return_value={"providers": {}}):
             self.assertEqual(telegram_dash.main(), 2)
 
+    def test_missing_chat_id_returns_exit_code_2(self):
+        # chat_id가 아무 소스에도 없으면(하드코딩 기본값 제거됨) 발송하지 않고 명확히 실패
+        with patch.object(sys, "argv", ["telegram_dash.py", "--mock", "all"]), \
+             patch.object(telegram_dash, "load_config", return_value={}), \
+             patch.object(telegram_dash, "_load_token", return_value="tok"), \
+             patch.object(telegram_dash, "load_state", return_value={}), \
+             patch.dict(os.environ, {}, clear=False), \
+             patch.object(telegram_dash, "fetch_payload", return_value={"providers": {}}):
+            os.environ.pop("TELEGRAM_CHAT_ID", None)
+            self.assertEqual(telegram_dash.main(), 2)
+
+    def test_last_levels_persisted_before_failing_upsert(self):
+        # 카드 편집(upsert)이 실패해도 last_levels는 먼저 저장돼 같은 전이가 재핑되지 않는다
+        payload = {"providers": {"claude": {"ok": True, "level": "red", "action": "대기"}}}
+        saved = []
+        with patch.object(sys, "argv", ["telegram_dash.py", "--mock", "all"]), \
+             patch.object(telegram_dash, "load_config", return_value={"chat_id": "-100"}), \
+             patch.object(telegram_dash, "_load_token", return_value="tok"), \
+             patch.object(telegram_dash, "load_state", return_value={"last_levels": {"claude": "green"}}), \
+             patch.object(telegram_dash, "fetch_payload", return_value=payload), \
+             patch.object(telegram_dash, "ping_if_worse", return_value={"claude": "red"}), \
+             patch.object(telegram_dash, "save_state", side_effect=lambda s: saved.append(dict(s))), \
+             patch.object(telegram_dash, "upsert_card", side_effect=telegram_dash.TelegramError("429", 429)):
+            with self.assertRaises(telegram_dash.TelegramError):
+                telegram_dash.main()
+        self.assertTrue(saved, "save_state가 upsert 실패 전에 호출돼야 함")
+        self.assertEqual(saved[0]["last_levels"], {"claude": "red"})
+
     def test_mock_out_does_not_need_token_or_network(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(sys, "argv", ["telegram_dash.py", "--mock", "all", "--out", os.path.join(directory, "x.txt")]), \
              patch.object(telegram_dash.urllib.request, "urlopen", side_effect=AssertionError("network")):

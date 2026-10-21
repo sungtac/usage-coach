@@ -318,8 +318,10 @@ def load_state():
 
 def save_state(state):
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
+    tmp = STATE_PATH + ".tmp"   # 같은 디렉토리 임시파일 + os.replace 로 원자적 교체(부분쓰기 방지)
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, STATE_PATH)
 
 
 # ---------------------------------------------------------------- main
@@ -360,6 +362,7 @@ def main():
 
     state = load_state()
     state["last_levels"] = ping_if_worse(webhook, payload, state)
+    save_state(state)   # 핑 상태를 먼저 영속화 — 카드 편집이 실패해도 같은 전이가 재핑되지 않도록
     state["message_id"] = upsert_card(webhook, components, state, args.force_new)
     save_state(state)
     return 0

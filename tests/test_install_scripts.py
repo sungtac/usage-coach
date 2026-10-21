@@ -8,9 +8,12 @@ def run(script, home):
     return subprocess.run(["bash", str(SCRIPTS / script)],
                           capture_output=True, text=True, env=env)
 
-def _prep(home):
+def _prep(home, discord=True, telegram=False):
     cfg = home / ".config/usage-coach"; cfg.mkdir(parents=True)
-    (cfg / "discord.json").write_text(json.dumps({"webhook_url": "https://example.invalid/hook"}))
+    if discord:
+        (cfg / "discord.json").write_text(json.dumps({"webhook_url": "https://example.invalid/hook"}))
+    if telegram:
+        (cfg / "telegram.json").write_text(json.dumps({"bot_token": "t", "chat_id": "-100"}))
     (home / "Library/LaunchAgents").mkdir(parents=True)
 
 def test_install_writes_plist(tmp_path):
@@ -26,7 +29,7 @@ def test_install_writes_plist(tmp_path):
     assert data["EnvironmentVariables"]["PATH"] == os.environ["PATH"]
 
 def test_install_writes_telegram_plist(tmp_path):
-    _prep(tmp_path)
+    _prep(tmp_path, telegram=True)
     r = run("install.sh", tmp_path)
     assert r.returncode == 0, r.stderr
     p = tmp_path / "Library/LaunchAgents/com.usage-coach.telegram-dashboard.plist"
@@ -35,11 +38,27 @@ def test_install_writes_telegram_plist(tmp_path):
     assert data["ProgramArguments"][1].endswith("telegram_dash.py")
     assert data["EnvironmentVariables"]["PATH"] == os.environ["PATH"]
 
-def test_install_fails_without_webhook_config(tmp_path):
+def test_discord_only_skips_telegram_plist(tmp_path):
+    # Discord 설정만 있으면 Discord agent만 설치 — Telegram agent는 만들지 않는다
+    _prep(tmp_path, discord=True, telegram=False)
+    r = run("install.sh", tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "Library/LaunchAgents/com.usage-coach.dashboard.plist").exists()
+    assert not (tmp_path / "Library/LaunchAgents/com.usage-coach.telegram-dashboard.plist").exists()
+
+def test_telegram_only_installs_without_discord(tmp_path):
+    # Telegram 설정만 있으면 Telegram agent만 깨끗이 설치되고 Discord agent는 안 만든다
+    _prep(tmp_path, discord=False, telegram=True)
+    r = run("install.sh", tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "Library/LaunchAgents/com.usage-coach.telegram-dashboard.plist").exists()
+    assert not (tmp_path / "Library/LaunchAgents/com.usage-coach.dashboard.plist").exists()
+
+def test_install_fails_without_any_config(tmp_path):
     (tmp_path / "Library/LaunchAgents").mkdir(parents=True)
     r = run("install.sh", tmp_path)
     assert r.returncode == 1
-    assert "webhook" in r.stderr.lower() or "webhook" in r.stdout.lower()
+    assert "webhook" in r.stderr.lower() or "telegram" in r.stderr.lower()
 
 def test_uninstall_removes_plist_and_keeps_config(tmp_path):
     _prep(tmp_path)
@@ -83,3 +102,12 @@ def test_statusline_tolerates_bad_input(tmp_path):
     r = subprocess.run(["bash", str(script)], input="not-json", capture_output=True,
                        text=True, env=dict(os.environ, HOME=str(tmp_path)))
     assert r.returncode == 0                          # statusline은 어떤 입력에도 죽지 않는다
+
+
+def test_statusline_tolerates_valid_nonobject_json(tmp_path):
+    # 유효 JSON이지만 객체가 아닌 입력(null/숫자/배열/문자열)도 d.get()로 죽지 않고 exit 0
+    script = Path(__file__).parent.parent / "scripts/statusline-command.sh"
+    for payload in ("null", "5", "[1, 2]", '"x"'):
+        r = subprocess.run(["bash", str(script)], input=payload, capture_output=True,
+                           text=True, env=dict(os.environ, HOME=str(tmp_path)))
+        assert r.returncode == 0, (payload, r.stderr)
