@@ -5,17 +5,20 @@ set -euo pipefail
 fail() { echo "오류: $*" >&2; exit 1; }
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-[[ "$(uname)" == "Darwin" ]] || fail "macOS 전용입니다 (launchd 사용)"
+# DRY_RUN 은 launchctl 없이 plist 만 만들므로 플랫폼 무관(테스트·검토용)
+[[ "${DRY_RUN:-0}" == "1" || "$(uname)" == "Darwin" ]] || fail "macOS 전용입니다 (launchd 사용)"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 [[ -n "$PYTHON_BIN" ]] || fail "python3 를 찾을 수 없음"
-# 대시보드별로 그 대시보드의 설정이 있을 때만 LaunchAgent 를 설치한다
+# 대시보드별로 그 대시보드의 설정 파일이 있을 때만 LaunchAgent 를 설치한다
 # (Discord 전용·Telegram 전용 사용자가 자기 것만 깨끗이 설치되도록). 둘 다 없으면 실패.
+# 환경변수(DISCORD_WEBHOOK_URL·TELEGRAM_*)는 launchd 잡에 전달되지 않으므로(plist엔 PATH만,
+# 비밀값은 굽지 않음) 설치 판정에 쓰지 않는다 — env만 있으면 5분마다 실패하는 잡이 생긴다.
 DISCORD_CFG=0
-[[ -f "$HOME/.config/usage-coach/discord.json" || -n "${DISCORD_WEBHOOK_URL:-}" ]] && DISCORD_CFG=1
+[[ -f "$HOME/.config/usage-coach/discord.json" ]] && DISCORD_CFG=1
 TELEGRAM_CFG=0
-[[ -f "$HOME/.config/usage-coach/telegram.json" || -n "${TELEGRAM_BOT_TOKEN:-}" ]] && TELEGRAM_CFG=1
+[[ -f "$HOME/.config/usage-coach/telegram.json" ]] && TELEGRAM_CFG=1
 [[ "$DISCORD_CFG" == 1 || "$TELEGRAM_CFG" == 1 ]] \
-  || fail "Discord/Telegram 설정이 없어요 — ~/.config/usage-coach/discord.json 에 {\"webhook_url\": \"...\"} 또는 telegram.json 중 하나는 먼저 만드세요"
+  || fail "Discord/Telegram 설정 파일이 없어요 — ~/.config/usage-coach/discord.json 에 {\"webhook_url\": \"...\"} 또는 telegram.json 중 하나는 먼저 만드세요 (환경변수는 launchd 잡에 전달되지 않음)"
 
 mkdir -p "$HOME/Library/LaunchAgents"
 # 설치 시점의 완전한 PATH를 굽는다 — launchd 기본 PATH에는 /usr/local/bin 등이 없어

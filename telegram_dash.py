@@ -60,9 +60,10 @@ def _plain_truncate(text):
     """길이 초과 시 태그를 제거한 안전한 HTML 텍스트로 줄인다."""
     if len(text) <= MAX_TEXT:
         return text
-    plain = re.sub(r"<[^>]*>", "", text)
-    plain = html.escape(html.unescape(plain), quote=False)
-    return plain[:MAX_TEXT - 3] + "..."
+    plain = html.unescape(re.sub(r"<[^>]*>", "", text))
+    # 이스케이프 전에 자른다 — 이스케이프 후 자르면 "&amp;"가 "&am"으로 끊겨 Telegram이
+    # 엔티티 파싱 오류(400)로 편집·발송을 모두 거부한다. 길이 한도는 엔티티 파싱 후 기준.
+    return html.escape(plain[:MAX_TEXT - 3], quote=False) + "..."
 
 
 def _window_line(code, info, width=None):

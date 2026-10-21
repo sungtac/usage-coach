@@ -29,7 +29,7 @@ Claude · Codex · Antigravity의 5시간·7일 한도를 교차 분석해 5가�
 ## 설치
 
 ```bash
-git clone https://github.com/netwaif/usage-coach.git
+git clone https://github.com/sungtac/usage-coach.git
 cd usage-coach
 # 전역 명령으로 쓰려면 심링크(선택)
 ln -s "$PWD/coach.py" /usr/local/bin/coach
@@ -51,36 +51,30 @@ codexbar 제약: `--provider all`은 hang하므로 provider별로 따로 조회�
 
 ## 테스트
 
-각 테스트 파일은 현재 작업 디렉터리와 무관하게 직접 실행할 수 있다.
+전체 스위트는 pytest로 돌린다(일부 테스트 파일은 pytest 함수형이라 직접 실행하면 아무것도 검사하지 않는다).
 
 ```bash
-for test_file in tests/test_*.py; do python3 "$test_file" || exit 1; done
+python3 -m pytest -q
 ```
 
 ## 요금 가드 (에이전트 루프)
 
 긴 자율 루프가 사용량을 보고 **위험하면 스스로 멈추게** 한다.
 
-- `coach --hook` — Claude Code Stop 훅용. 7일 가드. 정지 시 `{"continue":false}` 출력, 통과 시 무출력.
-- `coach --guard-check` — provider 중립 체크. 정지 시 exit≠0 + 사유, 통과 시 exit 0.
-- `coach guard on|off|status` — 런타임 스위치.
+- `coach --hook` — Claude Code Stop 훅용. 7일 가드. 정지 시 `{"continue":false,"stopReason":...}` 출력(exit 0), 통과 시 무출력. 훅 입력의 `stop_hook_active`가 참일 때(루프 2턴째부터)만 판정한다.
+- `coach --guard-check` — provider 중립 체크(Codex `/goal` 워처용). 정지 시 exit 10 + 사유 1줄(stdout), 통과 시 exit 0 무출력.
+- `coach guard on|off|status` — 런타임 스위치(기본 off → 항상 통과).
 
-판정 = 하이브리드 OR: `left < timeLeft − m`(페이스) **또는** `left < floor`(절대). guard가 켜진 상태에서 coach/codexbar 조회 오류나 유효한 7일 window 부재는 fail-closed 정지 사유다. 설정 = `~/.config/usage-coach/guard.json` (provider별 `m`/`floor`, 기본 0.10/0.10).
+판정 = 하이브리드 OR: `left < timeLeft − m`(페이스) **또는** `left < floor`(절대). 설정 = `~/.config/usage-coach/guard.json` (provider별 `m`/`floor`/`pace`, 기본 0.10/0.10/true).
+
+coach/codexbar 조회 오류나 유효한 7일 window 부재(판정 불가)는 기본 **fail-open** — 그 provider는 건너뛰고(경고는 stderr) 작업을 막지 않는다. 판정 불가도 정지시키려면 guard.json 최상위에 `"strict": true`를 넣는다(opt-in fail-closed).
 
 ## 디스코드 대시보드 (`discord_dash.py`)
 
 coach 출력을 **Components V2** 메시지(provider별 컨테이너 + 유니코드 게이지 바)로 조립해 디스코드 웹훅 메시지 하나를 **계속 편집**하는 라이브 대시보드. 채널을 열면 항상 최신 상태가 보인다. 전부 네이티브 텍스트라 데스크톱·모바일 어느 폭에서도 선명하다(구버전 PNG 카드는 세로가 길수록 통째로 축소되는 문제가 있어 교체).
 
 - 구성 = provider별 컨테이너(accent 색 = level) 안에 윈도우별 게이지 바 + **코칭 문구(action·reason 전문)** + 리셋 시각(`<t:..:R>` — 보는 사람 로컬 기준 "3시간 후"처럼 자동 표시).
-- **봇 세션 섹션**: Claude Code statusline이 `~/.config/usage-coach/sessions/`에 남기는 스냅샷으로 활동 중 세션(디렉토리·모델·컨텍스트 사용률)을 표시. statusline 스크립트에 스냅샷 기록 몇 줄을 추가해야 한다(입력 JSON의 `session_id`·`context_window.used_percentage` 사용, 30분 무활동 시 목록에서 제외).
-  - 스냅샷에 **`project_dir`(세션을 띄운 폴더)를 반드시 함께 기록**할 것 — `current_dir`만 적으면 세션이 하위 폴더로 `cd` 한 순간 봇 행 매칭이 끊겨 표시가 멈춘다(실측). 기록 예:
-    ```jq
-    {cwd: (.workspace.current_dir // .cwd // ""),
-     project_dir: (.workspace.project_dir // .workspace.current_dir // .cwd // ""),
-     model: (.model.display_name // ""),
-     used: (.context_window.used_percentage // null), ts: (now | floor)}
-    ```
-    매칭은 `project_dir` 우선, 없으면 `cwd` 폴백이라 옛 스냅샷도 그대로 동작한다.
+- (봇 세션 섹션은 제거됐다. `scripts/statusline-command.sh`는 여전히 `~/.config/usage-coach/sessions/<session_id>.json` 스냅샷을 남기지만 현재 대시보드는 이를 표시하지 않는다.)
 - level이 🟡/🔴로 **나빠지는 순간에만** 새 메시지를 게시해 푸시 알림을 울린다(평소 편집은 무알림).
 - 의존성 없음(coach 본체와 동일 — 표준 라이브러리만).
 - 함정: 웹훅으로 components를 보낼 때 URL에 `?with_components=true`가 없으면 필드가 통째로 무시된다(`Cannot send an empty message`, 50006). POST·PATCH(편집) 모두 해당.
@@ -105,7 +99,7 @@ python3 telegram_dash.py --mock all --out t.txt  # API 없이 검증
 python3 telegram_dash.py                       # 조회→Telegram 업서트(+악화 핑)
 ```
 
-주기 실행은 `scripts/install.sh`가 설치 시점의 PATH를 포함한 두 LaunchAgent를 생성한다. 실행 전 `DRY_RUN=1 scripts/install.sh`로 생성 내용을 검토할 수 있다.
+주기 실행은 `scripts/install.sh`가 설치 시점의 PATH를 포함한 두 LaunchAgent를 생성한다(대시보드별로 `discord.json`/`telegram.json` 설정 파일이 있을 때만 — 환경변수는 launchd 잡에 전달되지 않으므로 설정은 파일에 둘 것). 실행 전 `DRY_RUN=1 scripts/install.sh`로 생성 내용을 검토할 수 있다.
 
 ## 라이선스
 

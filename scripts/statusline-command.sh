@@ -8,7 +8,7 @@
 # 어떤 입력에도 0으로 종료한다 — statusline 실패가 세션을 방해하면 안 된다.
 input=$(cat)
 STATUSLINE_INPUT="$input" exec python3 - <<'PY'
-import json, os, sys, time
+import json, os, re, sys, time
 
 try:
     d = json.loads(os.environ.get("STATUSLINE_INPUT", ""))
@@ -17,10 +17,20 @@ except ValueError:
 if not isinstance(d, dict):   # 유효 JSON이어도 객체가 아니면(null/숫자/배열/문자열) 데이터 없음 처리
     sys.exit(0)
 
-ws = d.get("workspace") or {}
-cwd = ws.get("current_dir") or d.get("cwd") or ""
-model = (d.get("model") or {}).get("display_name") or ""
-used = (d.get("context_window") or {}).get("used_percentage")
+def obj(v):   # 중첩 필드가 객체가 아니면(문자열 등) 빈 객체로 — .get() 크래시 방지
+    return v if isinstance(v, dict) else {}
+
+
+def text(v):
+    return v if isinstance(v, str) else ""
+
+
+ws = obj(d.get("workspace"))
+cwd = text(ws.get("current_dir")) or text(d.get("cwd"))
+model = text(obj(d.get("model")).get("display_name"))
+used = obj(d.get("context_window")).get("used_percentage")
+if isinstance(used, bool) or not isinstance(used, (int, float)):
+    used = None
 
 home = os.path.expanduser("~")
 short = "~" + cwd[len(home):] if cwd.startswith(home) else cwd
@@ -30,13 +40,14 @@ if used is not None:
 print(line, end="")
 
 sid = d.get("session_id")
-if sid:
+# session_id는 파일명으로 쓰이므로 안전 문자만 허용 — "../x" 같은 값이 sessions/ 밖에 쓰지 못하게
+if isinstance(sid, str) and re.fullmatch(r"[A-Za-z0-9._-]+", sid) and sid not in (".", ".."):
     snap_dir = os.path.join(home, ".config/usage-coach/sessions")
     try:
         os.makedirs(snap_dir, exist_ok=True)
         with open(os.path.join(snap_dir, f"{sid}.json"), "w") as f:
             json.dump({"cwd": cwd,
-                       "project_dir": ws.get("project_dir") or cwd,
+                       "project_dir": text(ws.get("project_dir")) or cwd,
                        "model": model, "used": used,
                        "ts": int(time.time())}, f)
     except OSError:
