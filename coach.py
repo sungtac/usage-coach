@@ -182,10 +182,13 @@ def win(w):
     codexbar가 windowMinutes/usedPercent/resetsAt를 null·누락으로 줄 때가 있어
     (예: antigravity 간헐적) 그 윈도우는 스킵해 provider 전체 크래시를 막는다.
     """
-    if not w:
+    if not isinstance(w, dict) or not w:
         return None
     wm, up, rs = w.get("windowMinutes"), w.get("usedPercent"), w.get("resetsAt")
     if not wm or up is None:   # 누락/null/0 → 스킵
+        return None
+    # 숫자 아닌 값("abc"·리스트 등) → 스킵(뒤의 산술 TypeError로 provider 전체가 죽지 않게)
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in (wm, up)) or wm < 0:
         return None
     if not rs:
         # codexbar may omit resetsAt when a short window is completely full.
@@ -197,6 +200,8 @@ def win(w):
         resets = dt.datetime.fromisoformat(rs.replace("Z", "+00:00"))
     except Exception:
         return None
+    if resets.tzinfo is None:   # 오프셋 없는 시각은 UTC로 간주(aware-naive 뺄셈 TypeError 방지)
+        resets = resets.replace(tzinfo=dt.timezone.utc)
     if resets.year < 2000:   # epoch/placeholder 가드
         return None
     mins = max(0.0, (resets - now_utc()).total_seconds() / 60.0)
@@ -560,13 +565,29 @@ def load_guard_config(path=GUARD_CONFIG_PATH):
     return cfg
 
 
-def guard_check(sources, cfg):
+def load_guard_strict(path=GUARD_CONFIG_PATH):
+    """guard.json 최상위 "strict": true 면 엄격(fail-closed) 모드. 기본·깨진 값 = false.
+
+    기본(fail-open): 조회 실패 / 유효한 7일 window 부재는 작업을 막지 않는다(경고만 stderr).
+    소비자(Claude Stop 훅 `|| true`, Codex goal 워처)는 "조회 실패 = 정지 안 함"을 전제로 한다.
+    strict(opt-in): 그런 판정 불가도 정지 사유로 본다.
+    """
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except Exception:
+        return False
+    return isinstance(raw, dict) and raw.get("strict") is True
+
+
+def guard_check(sources, cfg, strict=False):
     """7일 윈도우 하이브리드 OR 가드. -> stopReason(str) 또는 None(통과).
 
     정지 조건(provider별, 하나라도 걸리면 정지):
       left < timeLeft − m   (pace: 너무 빨리 태움 — pace:false면 건너뜀)
       OR left < floor       (absolute: 바닥 임박)
-    guard가 켜진 상태에서는 조회 실패 / 7일 windowMinutes 없음도 안전상 정지 사유다.
+    조회 실패 / 7일 windowMinutes 없음(판정 불가)은 기본 fail-open — 그 provider만 건너뛰고
+    stderr에 경고. strict=True(guard.json "strict": true, opt-in)면 판정 불가도 정지 사유다.
     """
     triggers = []
     unavailable = []
@@ -593,7 +614,9 @@ def guard_check(sources, cfg):
             triggers.append(f"{label} 주간 한도 바닥 임박 — 남은 {left*100:.0f}% "
                             f"< 하한 {floor*100:.0f}%")
     if unavailable:
-        return "요금가드 판정 불가 — " + " · ".join(unavailable) + " → 작업을 멈추고 coach/codexbar 상태를 확인하세요."
+        if strict:
+            return "요금가드 판정 불가 — " + " · ".join(unavailable) + " → 작업을 멈추고 coach/codexbar 상태를 확인하세요."
+        print("요금가드 경고(fail-open, 정지 안 함): " + " · ".join(unavailable), file=sys.stderr)
     if not triggers:
         return None
     return "요금가드: " + " · ".join(triggers) + " → 작업을 멈추고 확인하세요."
@@ -660,7 +683,7 @@ def run_guard_cmd(action, sources):
         print(f"요금가드: {state}")
         # 지금이면 어떻게 판정되는지 라이브 미리보기(스위치 상태와 무관하게 항상 보여줌).
         try:
-            reason = guard_check(sources, load_guard_config())
+            reason = guard_check(sources, load_guard_config(), load_guard_strict())
         except Exception:
             reason = None                           # 조회 오류 → status 미리보기만 생략
         if reason:
@@ -679,9 +702,16 @@ def run_hook(sources):
     if not guard_enabled():
         return                                      # 스위치 off → 통과(무출력)
     event = read_hook_event()                       # stdin 이벤트 소비 + 값 사용
-    if not event.get("stop_hook_active"):
-        return                                      # 루프 턴 아님 → 통과(무출력)
-    reason = guard_check(sources, load_guard_config())
+    if not isinstance(event, dict) or not event.get("stop_hook_active"):
+        return                                      # 루프 턴 아님/이벤트 형식 이상 → 통과(무출력)
+    strict = load_guard_strict()
+    try:
+        reason = guard_check(sources, load_guard_config(), strict)
+    except Exception as exc:                        # 예기치 못한 오류: 기본 fail-open
+        if not strict:
+            print(f"요금가드 경고(fail-open): {type(exc).__name__}", file=sys.stderr)
+            return
+        reason = f"요금가드 판정 불가 — 내부 오류({type(exc).__name__})"
     if reason:
         print(json.dumps({"continue": False, "stopReason": reason}, ensure_ascii=False))
     # 통과면 아무것도 출력하지 않는다.
@@ -691,11 +721,19 @@ def run_guard_check(sources):
     """`coach --guard-check` — Codex 워처용 provider-중립 모드. -> exit code(int).
 
     루프 게이트 없음 + guard-enabled 게이트는 적용(off면 통과).
-    출력 계약: 통과 → exit 0 + 무출력 / 정지·판정불가 → exit≠0(10) + 사유 1줄 stdout.
+    출력 계약: 통과 → exit 0 + 무출력(stdout) / 정지 → exit≠0(10) + 사유 1줄 stdout.
+    판정 불가(조회 실패 등)는 기본 통과(fail-open, 경고는 stderr), strict 모드면 정지.
     """
     if not guard_enabled():
         return 0                                    # 스위치 off → 통과(무출력)
-    reason = guard_check(sources, load_guard_config())
+    strict = load_guard_strict()
+    try:
+        reason = guard_check(sources, load_guard_config(), strict)
+    except Exception as exc:                        # 예기치 못한 오류: 기본 fail-open
+        if not strict:
+            print(f"요금가드 경고(fail-open): {type(exc).__name__}", file=sys.stderr)
+            return 0
+        reason = f"요금가드 판정 불가 — 내부 오류({type(exc).__name__})"
     if reason:
         print(reason)
         return 10
@@ -775,10 +813,11 @@ def build_sources(args, p):
             path, prov = spec.rsplit(":", 1)
             sources.append((prov, "file", path))
         return sources
+    provs = [prov.strip() for prov in args.providers.split(",") if prov.strip()]   # "claude, codex" 공백 허용
     return [(prov,
              "live-all" if prov == "antigravity" and prov not in ACCOUNT_OVERRIDES else "live",
              prov)
-            for prov in args.providers.split(",") if prov.strip()]
+            for prov in provs]
 
 
 def main():

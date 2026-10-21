@@ -126,12 +126,13 @@ def build_coach_extra_args(args, config):
     for aspec in args.account:
         extra += ["--account", aspec]
 
-    provs_csv = args.providers or "claude,codex,antigravity"
+    provs = [p.strip() for p in (args.providers or "claude,codex,antigravity").split(",")
+             if p.strip()]   # "claude, codex"처럼 공백이 섞여도 동일 처리
     live = not (args.mock or args.file)
     multi_provs = ([p for p in config.get("all_accounts", ["antigravity"])
-                    if p in provs_csv.split(",")] if live else [])
+                    if p in provs] if live else [])
     if live:
-        single = [p for p in provs_csv.split(",") if p.strip() and p not in multi_provs]
+        single = [p for p in provs if p not in multi_provs]
         extra += ["--providers", ",".join(single)]
     elif args.providers:
         extra += ["--providers", args.providers]
