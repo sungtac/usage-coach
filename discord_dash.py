@@ -274,7 +274,12 @@ def ping_if_worse(webhook, payload, state):
     last = state.get("last_levels", {})
     now = {}
     for key, p in payload.get("providers", {}).items():
-        lv = p.get("level") if p.get("ok") else None
+        if not p.get("ok"):
+            # 일시적 조회 실패는 직전 level을 유지한다 — None으로 덮으면 '정상→실패→red' 전이에서
+            # prev가 None이 돼 악화 핑이 영영 울리지 않는다.
+            now[key] = last.get(key)
+            continue
+        lv = p.get("level")
         now[key] = lv
         if lv not in ("yellow", "red"):
             continue

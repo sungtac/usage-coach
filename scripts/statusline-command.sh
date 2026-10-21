@@ -33,7 +33,8 @@ if isinstance(used, bool) or not isinstance(used, (int, float)):
     used = None
 
 home = os.path.expanduser("~")
-short = "~" + cwd[len(home):] if cwd.startswith(home) else cwd
+# 경로 경계까지 비교 — /home/sungt 가 /home/sungtac/... 를 "~ac/..." 로 줄이지 않게
+short = "~" + cwd[len(home):] if cwd == home or cwd.startswith(home.rstrip("/") + "/") else cwd
 line = short + (f" [{model}]" if model else "")
 if used is not None:
     line += f" · ctx {round(used)}%"

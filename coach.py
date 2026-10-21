@@ -301,6 +301,18 @@ def antigravity_gemini_only(usage):
     return u
 
 
+def _last_line(out):
+    """codexbar 실패 출력 -> 사람이 읽을 마지막 비어있지 않은 줄(없으면 '조회 실패').
+
+    stderr가 공백/개행뿐이면 strip 후 splitlines()가 비어 [-1]이 IndexError가 되고,
+    실패 사유가 'list index out of range'로 둔갑한다."""
+    for text in (out.stderr, out.stdout):
+        lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+        if lines:
+            return lines[-1]
+    return "조회 실패"
+
+
 def fetch_live(provider):
     """codexbar 라이브 조회 -> usage dict. 실패 시 예외.
 
@@ -319,7 +331,7 @@ def fetch_live(provider):
                                  timeout=40, start_new_session=True,
                                  stdin=subprocess.DEVNULL)
             if out.returncode != 0:
-                raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
+                raise RuntimeError(_last_line(out))
             data = json.loads(out.stdout)
             usage = data[0]["usage"]
             return antigravity_gemini_only(usage) if provider == "antigravity" else usage
@@ -334,7 +346,7 @@ def fetch_live_all(provider):
     out = subprocess.run(cmd, capture_output=True, text=True,
                          timeout=120, start_new_session=True, stdin=subprocess.DEVNULL)
     if out.returncode != 0:
-        error = (out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1]
+        error = _last_line(out)
         try:
             usage = fetch_live(provider)
         except RuntimeError:
@@ -615,11 +627,29 @@ def guard_check(sources, cfg, strict=False):
                             f"< 하한 {floor*100:.0f}%")
     if unavailable:
         if strict:
-            return "요금가드 판정 불가 — " + " · ".join(unavailable) + " → 작업을 멈추고 coach/codexbar 상태를 확인하세요."
+            # 다른 provider의 실제 정지 사유(페이스 초과·바닥 임박)도 함께 남긴다 — 판정 불가 문구에 묻히지 않게.
+            found = (" · 그 외 요금가드: " + " · ".join(triggers)) if triggers else ""
+            return ("요금가드 판정 불가 — " + " · ".join(unavailable) + found
+                    + " → 작업을 멈추고 coach/codexbar 상태를 확인하세요.")
         print("요금가드 경고(fail-open, 정지 안 함): " + " · ".join(unavailable), file=sys.stderr)
     if not triggers:
         return None
     return "요금가드: " + " · ".join(triggers) + " → 작업을 멈추고 확인하세요."
+
+
+def guard_decision(sources):
+    """hook·--guard-check·guard status가 공유하는 단일 판정 -> stopReason 또는 None.
+
+    guard.json strict 여부와 예기치 못한 내부 오류 처리를 한 곳에서 정해, status 미리보기가
+    실제 훅/워처 판정과 어긋나지 않게 한다(기본 fail-open, strict면 내부 오류도 정지)."""
+    strict = load_guard_strict()
+    try:
+        return guard_check(sources, load_guard_config(), strict)
+    except Exception as exc:
+        if not strict:
+            print(f"요금가드 경고(fail-open): {type(exc).__name__}", file=sys.stderr)
+            return None
+        return f"요금가드 판정 불가 — 내부 오류({type(exc).__name__})"
 
 
 def read_hook_event():
@@ -682,10 +712,7 @@ def run_guard_cmd(action, sources):
         state = "on" if guard_enabled() else "off"
         print(f"요금가드: {state}")
         # 지금이면 어떻게 판정되는지 라이브 미리보기(스위치 상태와 무관하게 항상 보여줌).
-        try:
-            reason = guard_check(sources, load_guard_config(), load_guard_strict())
-        except Exception:
-            reason = None                           # 조회 오류 → status 미리보기만 생략
+        reason = guard_decision(sources)            # 훅/워처와 동일 판정(strict 포함)
         if reason:
             print(f"  지금이면 정지: {reason}")
         else:
@@ -704,14 +731,7 @@ def run_hook(sources):
     event = read_hook_event()                       # stdin 이벤트 소비 + 값 사용
     if not isinstance(event, dict) or not event.get("stop_hook_active"):
         return                                      # 루프 턴 아님/이벤트 형식 이상 → 통과(무출력)
-    strict = load_guard_strict()
-    try:
-        reason = guard_check(sources, load_guard_config(), strict)
-    except Exception as exc:                        # 예기치 못한 오류: 기본 fail-open
-        if not strict:
-            print(f"요금가드 경고(fail-open): {type(exc).__name__}", file=sys.stderr)
-            return
-        reason = f"요금가드 판정 불가 — 내부 오류({type(exc).__name__})"
+    reason = guard_decision(sources)
     if reason:
         print(json.dumps({"continue": False, "stopReason": reason}, ensure_ascii=False))
     # 통과면 아무것도 출력하지 않는다.
@@ -726,14 +746,7 @@ def run_guard_check(sources):
     """
     if not guard_enabled():
         return 0                                    # 스위치 off → 통과(무출력)
-    strict = load_guard_strict()
-    try:
-        reason = guard_check(sources, load_guard_config(), strict)
-    except Exception as exc:                        # 예기치 못한 오류: 기본 fail-open
-        if not strict:
-            print(f"요금가드 경고(fail-open): {type(exc).__name__}", file=sys.stderr)
-            return 0
-        reason = f"요금가드 판정 불가 — 내부 오류({type(exc).__name__})"
+    reason = guard_decision(sources)
     if reason:
         print(reason)
         return 10
@@ -759,7 +772,8 @@ def run_watch(sources, interval):
     sys.stdout.write("\033[2J\033[H  사용량 불러오는 중... "
                      "(codexbar를 provider별로 순차 조회해서 1분쯤 걸릴 수 있어요)\033[J")
     sys.stdout.flush()
-    old_attr = None
+    stdin_open = True   # 비-tty stdin이 EOF(/dev/null·닫힌 파이프)면 select가 즉시 반환해
+    old_attr = None     # interval을 무시한 무한 재조회(codexbar 연타)가 되므로 EOF 후엔 stdin을 안 본다
     if is_tty:
         # cbreak + 에코 off: Enter가 화면에 개행을 찍지 않고 바로 갱신 트리거가 된다
         # (기존엔 canonical 모드라 에코된 개행이 커서만 내리고, 갱신 표시도 없어
@@ -770,14 +784,22 @@ def run_watch(sources, interval):
         while True:
             frame = render(gather(sources)) + footer   # 느린 조회 동안 이전 프레임 유지
             _draw(frame)
-            r, _, _ = select.select([sys.stdin], [], [], interval)
+            r, _, _ = select.select([sys.stdin] if stdin_open else [], [], [], interval)
             if r:
                 if is_tty:
                     keys = os.read(sys.stdin.fileno(), 1024)
+                    if not keys:                    # 터미널 끊김(EOF) → 주기 갱신만
+                        stdin_open = False
+                        select.select([], [], [], interval)
                     if b"q" in keys.lower():
                         break
-                elif sys.stdin.readline().strip().lower() == "q":
-                    break
+                else:
+                    line = sys.stdin.readline()
+                    if not line:                    # EOF → 이후엔 주기 갱신만(이번 주기도 대기)
+                        stdin_open = False
+                        select.select([], [], [], interval)
+                    if line.strip().lower() == "q":
+                        break
             _draw(frame + _c("90", "  갱신 중..."))   # 조회 시작 즉시 진행 표시
     except KeyboardInterrupt:
         pass
