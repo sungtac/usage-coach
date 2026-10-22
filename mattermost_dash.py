@@ -104,6 +104,10 @@ def _provider_section(key, p):
     head = f"**{emoji} {key.title()}**"
     if p.get("email"):
         head += f" · {p['email']}"
+    elif key == "claude":
+        # Claude 조회는 성공해도 codexbar가 계정 식별자를 반환하지 않을 수 있다.
+        # 빈 헤더로 숨기지 않고 현재 조회 한계를 명시한다.
+        head += " · 계정 식별자 미제공"
     if p.get("action"):
         head += f" — {p['action']}"
 

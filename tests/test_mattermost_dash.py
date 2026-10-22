@@ -61,6 +61,15 @@ def test_fetch_payload_use_cache_false_always_bypasses(monkeypatch, tmp_path):
     assert mm.fetch_payload([], use_cache=False) == {"marker": "live"}
 
 
+def test_render_card_explains_missing_claude_account_identifier():
+    message = mm.render_card({"providers": {
+        "claude": {"ok": True, "level": "green", "action": "사용 가능", "windows": {}},
+    }})
+
+    assert "Claude" in message
+    assert "계정 식별자 미제공" in message
+
+
 # ---------------------------------------------------------------- upsert_card
 
 def test_upsert_card_edits_existing_post(monkeypatch):
