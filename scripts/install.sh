@@ -25,12 +25,15 @@ mkdir -p "$HOME/Library/LaunchAgents"
 # coach.py의 codexbar 호출이 Errno 2로 죽는다 (2026-08-04 E2E 실측)
 # plist는 XML이므로 & 뿐 아니라 < > " 까지 모두 이스케이프한다(& 먼저).
 # PATH뿐 아니라 저장소 경로($DIR, 예: ~/R&D/usage-coach)·PYTHON_BIN 도 plist에 들어가므로 같이 이스케이프.
+# 치환문의 & 는 \& 로 이스케이프해야 한다 — bash 5.2+ 에서 ${v//p/s} 의 s 안에 있는 & 는
+# "매칭된 문자열"로 확장되므로, &lt; 라고 쓰면 & 가 매칭(<)으로 치환돼 <lt; 가 된다.
+# (&amp; 만은 매칭이 & 라서 우연히 결과가 같아 이 버그가 오래 가려져 있었다.)
 xml_esc() {
   local v="$1"
-  v="${v//&/&amp;}"
-  v="${v//</&lt;}"
-  v="${v//>/&gt;}"
-  v="${v//\"/&quot;}"
+  v="${v//&/\&amp;}"
+  v="${v//</\&lt;}"
+  v="${v//>/\&gt;}"
+  v="${v//\"/\&quot;}"
   printf '%s' "$v"
 }
 PATH_ESC="$(xml_esc "$PATH")"

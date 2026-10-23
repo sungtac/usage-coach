@@ -270,13 +270,18 @@ def upsert_card(webhook, components, state, force_new=False):
 
 
 def ping_if_worse(webhook, payload, state):
-    """provider level이 yellow/red로 악화된 순간에만 새 메시지(푸시)."""
+    """provider level이 yellow/red로 악화된 순간에만 새 메시지(푸시).
+
+    여러 provider가 동시에 악화되면 한 메시지로 묶고, 이전 핑(state["last_ping_id"])은
+    지우고 새로 게시한다 — 안 지우면 악화될 때마다 채널에 핑이 쌓인다(카드는 upsert_card
+    편집이라 안 쌓이지만 핑은 이 처리가 없으면 쌓였다)."""
     last = state.get("last_levels", {})
     now = {}
+    lines = []
     for key, p in payload.get("providers", {}).items():
         if not p.get("ok"):
-            # 일시적 조회 실패는 직전 level을 유지한다 — None으로 덮으면 '정상→실패→red' 전이에서
-            # prev가 None이 돼 악화 핑이 영영 울리지 않는다.
+            # 일시적 조회 실패는 직전 level을 유지한다 — None으로 덮으면 '정상→실패→red'
+            # 전이에서 prev가 None이 돼 악화 핑이 영영 울리지 않는다.
             now[key] = last.get(key)
             continue
         lv = p.get("level")
@@ -285,14 +290,28 @@ def ping_if_worse(webhook, payload, state):
             continue
         prev = last.get(key)
         if prev is not None and SEVERITY.get(lv, 9) < SEVERITY.get(prev, 9):
-            color, emoji, verdict = LEVELS[lv]
+            _color, emoji, verdict = LEVELS[lv]
             who = key.title()
             if p.get("email"):
                 who += f"({p['email'].split('@', 1)[0]})"
-            _request(webhook, "POST", {
-                "username": USERNAME,
-                "content": f"{emoji} **{who}** {verdict} — {p.get('action', '')}",
+            lines.append(f"{emoji} **{who}** {verdict} — {p.get('action', '')}")
+
+    if lines:
+        old_id = state.get("last_ping_id")
+        if old_id:
+            try:
+                _request(f"{webhook}/messages/{old_id}", "DELETE", None)
+            except Exception as e:
+                print(f"이전 핑 삭제 실패: {e}", file=sys.stderr)
+        try:
+            res = _request(f"{webhook}?wait=true", "POST", {
+                "username": USERNAME, "content": "\n".join(lines),
             })
+            state["last_ping_id"] = res.get("id")
+        except Exception as e:
+            # 여기서 죽으면 now가 반환/저장되지 않아 다음 주기에 같은 전이를
+            # 다시 악화로 오인해 중복 알림을 보낸다 — 실패해도 계속 진행.
+            print(f"핑 전송 실패: {e}", file=sys.stderr)
     return now
 
 
