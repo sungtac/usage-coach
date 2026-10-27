@@ -44,8 +44,28 @@ def _live_fetch(extra_args):
     return json.loads(out.stdout)
 
 
+def _write_cache(payload):
+    """직접 조회 결과를 캐시에 되돌려 쓴다(원자적 교체).
+
+    2026-10-23: 이 캐시는 원래 디스코드 크론이 채우는 구조였다. 그런데 이 노트북에는
+    해당 크론이 없어(디스코드 운영권한이 갤럭시로 위임됨) 캐시가 2026-10-22 데이터에서
+    멈췄고, 5분마다 "오래됨 — 직접 조회로 폴백"만 쌓였다(30시간 경과, 하루 288줄).
+    폴백 자체는 정상 동작하므로 기능 장애는 아니었지만, 캐시가 영구히 죽은 채
+    같은 조회를 반복하고 로그를 오염시켰다. 직접 조회에 성공하면 캐시를 갱신해
+    스스로 복구되게 한다. 디스코드 크론이 돌아오면 같은 파일을 덮어쓰므로 충돌하지 않는다.
+    """
+    try:
+        tmp = f"{COACH_CACHE_PATH}.tmp-{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"payload": payload, "ts": int(time.time())}, f, ensure_ascii=False)
+        os.replace(tmp, COACH_CACHE_PATH)
+    except OSError as exc:
+        # 캐시 갱신 실패는 대시보드 발행을 막을 이유가 아니다.
+        print(f"coach-cache.json 갱신 실패(무시): {exc}", file=sys.stderr)
+
+
 def fetch_payload(extra_args, use_cache=True):
-    """coach-cache.json(디스코드 크론이 채움)을 우선 사용, 없거나 오래됐으면 직접 조회.
+    """coach-cache.json을 우선 사용, 없거나 오래됐으면 직접 조회.
     use_cache=False(--mock/--file 등 명시적 오버라이드)면 캐시를 건너뛰고 항상 직접 조회."""
     if use_cache:
         try:
@@ -57,6 +77,9 @@ def fetch_payload(extra_args, use_cache=True):
             print(f"coach-cache.json이 {int(age)}초 전 데이터라 오래됨 — 직접 조회로 폴백", file=sys.stderr)
         except (OSError, json.JSONDecodeError, KeyError):
             pass
+        payload = _live_fetch(extra_args)
+        _write_cache(payload)
+        return payload
     return _live_fetch(extra_args)
 
 
